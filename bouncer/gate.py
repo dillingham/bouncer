@@ -407,9 +407,11 @@ class Gate:
             fails = int(prev.get("fails", 0))
             if fails >= self.cfg.max_attempts:
                 state = {**prev, "sha": head_sha, "status": "exhausted"}
-                self._save_state(n, sticky, f"### 🚪 Bouncer\n\nThis pull request has used all {self.cfg.max_attempts} review rounds. Closing.", state)
+                closing = "Closing." if self.cfg.close_on_fail else "Left open for a maintainer to decide."
+                self._save_state(n, sticky, f"### 🚪 Bouncer\n\nThis pull request has used all {self.cfg.max_attempts} review rounds. {closing}", state)
                 self._set_labels(n, labels, L_FAIL)
-                self._close(n)
+                if self.cfg.close_on_fail:
+                    self._close(n)
                 return "exhausted"
             state = {
                 "v": 1,

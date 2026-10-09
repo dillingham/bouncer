@@ -689,6 +689,15 @@ def test_reopen_same_commit():
     assert gate(gh).process(make_pr(), action="reopened", sender="maint") == "override"
 
 
+def test_out_of_attempts_respects_close_on_fail():
+    gh = FakeGitHub()
+    cfg = "gate: {max_attempts: 1, close_on_fail: false}"
+    gate(gh, cfg_text=cfg).process(make_pr(sha=A), action="opened")
+    assert gate(gh, verifier=lambda r, s: [found("fail", sha=A)], cfg_text=cfg).process(make_pr(sha=A)) == "fail"
+    assert gate(gh, cfg_text=cfg).process(make_pr(sha=B), action="synchronize") == "exhausted"
+    assert 7 not in gh.closed and gh.labels[7] == {"bouncer:fail"}
+
+
 @pytest.mark.parametrize("rereview", [True, False])
 def test_override_holds_for_later_commits(rereview):
     gh = FakeGitHub(maintainers={"maint"})
