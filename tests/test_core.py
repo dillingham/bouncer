@@ -1,6 +1,7 @@
 import base64
 import copy
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -195,9 +196,39 @@ def test_workspace_reads_and_blocks(ws):
     assert ws.list_dir("base", "") == "src/"
     assert "src/app.py:3:# head" in ws.grep("head", "head", "")
     assert ws.grep("base", "head", "") == "(no matches)"
-    for bad in ("../secret.txt", "/../../secret.txt", ".git/config"):
+    for bad in ("../secret.txt", "/../../secret.txt", ".git/config", "src/../.git/config", "./.git/HEAD", "a\0.py"):
         with pytest.raises(ToolError):
             ws.read_file("base", bad, 1, 0)
+
+
+def test_workspace_blocks_git_dir_through_symlinks(ws, tmp_path):
+    (tmp_path / "head/cfg").symlink_to(tmp_path / "head/.git/config")
+    (tmp_path / "head/gitdir").symlink_to(tmp_path / "head/.git")
+    for bad in ("cfg", "gitdir/config", "gitdir"):
+        with pytest.raises(ToolError):
+            ws.read_file("head", bad, 1, 0)
+
+
+@pytest.mark.skipif(not shutil.which("python3.12"), reason="needs python3.12, which review.yml uses")
+def test_symlink_loop_is_a_tool_error_on_python_312(tmp_path):
+    head = tmp_path / "head"
+    head.mkdir()
+    (head / "a").symlink_to("b")
+    (head / "b").symlink_to("a")
+    code = (f"from pathlib import Path\nfrom bouncer.agent import Workspace, Agent\n"
+            f"ws = Workspace({{'base': Path({str(head)!r}), 'head': Path({str(head)!r})}})\n"
+            "a = Agent(None, 'm', 'high', 3, ws, None, 'o/r', log=lambda *_: None)\n"
+            "print(a.run_tool('read_file', {'root': 'head', 'path': 'a', 'start_line': 1, 'end_line': 0}))\n")
+    r = subprocess.run(["python3.12", "-c", code], capture_output=True, text=True, cwd=ROOT)
+    assert r.returncode == 0 and r.stdout.startswith("error:"), r.stderr
+
+
+def test_evidence_with_odd_paths_is_just_unverified(ws, tmp_path):
+    (tmp_path / "head/loop").symlink_to("loop")
+    review = normalize_review({"rules": [{"id": "correct", "result": "fail", "confidence": 1, "reason": "x", "evidence": [
+        {"root": "head", "path": p, "line": 1, "quote": "x"} for p in ("a\0.py", "loop", "src/../.git/config")]}]}, ["correct"])
+    verify_evidence(review, ws)
+    assert [e["verified"] for e in review["rules"][0]["evidence"]] == [False, False, False]
 
 
 def test_untrusted_fence_cannot_be_closed_early():

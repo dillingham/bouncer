@@ -125,11 +125,16 @@ class Workspace:
             raise ToolError(f"unknown root {root!r}")
         base = self.roots[root].resolve()
         rel = (path or "").strip().lstrip("/")
-        if rel.split("/")[0] == ".git":
-            raise ToolError("the .git directory is not readable")
-        target = (base / rel).resolve()
+        try:
+            target = (base / rel).resolve()
+        except (OSError, RuntimeError, ValueError) as e:
+            # RuntimeError: a symlink loop (Python 3.12); ValueError: a NUL byte in the path.
+            raise ToolError(f"can't open {path!r}: {e}") from None
         if target != base and base not in target.parents:
             raise ToolError("path escapes the repository")
+        # Checked on the resolved path, so neither src/../.git nor a symlink into it gets around it.
+        if ".git" in target.relative_to(base).parts:
+            raise ToolError("the .git directory is not readable")
         return target
 
     def list_dir(self, root: str, path: str) -> str:
