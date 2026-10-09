@@ -43,6 +43,8 @@ def test_defaults_and_template_parse():
     "checks: {max_changed_lines: -1}",
     "checks: {max_author_prs_24h: -5}",
     "- just a list",
+    "checks: {forbidden_paths: ['!docs/**']}",  # negation isn't supported
+    "checks: {forbidden_paths: ['/']}",
     "rules: [\n",  # YAML syntax error
     "a: b: c",
 ])
@@ -101,6 +103,22 @@ def test_globs():
     assert path_matches("src/c.py", ["src/**/*.py"])
     assert not path_matches("src/c.js", ["src/**/*.py"])
     assert not path_matches("docs/.github/x", [".github/**"])
+
+
+@pytest.mark.parametrize("pattern,path,hit", [
+    ("/.github/**", ".github/workflows/ci.yml", True),  # leading slash: from the repository root
+    ("/vendor/", "src/vendor/x.c", False),
+    ("vendor/", "vendor/lib/x.c", True),  # trailing slash: a directory, at any depth
+    ("vendor/", "src/vendor/x.c", True),
+    ("vendor/", "vendor", False),  # a file called vendor
+    ("*.lock", "web/yarn.lock", True),  # no slash: at any depth
+    ("*.lock", "yarn.lock", True),
+    (".github", ".github/workflows/ci.yml", True),  # a matching directory covers what's inside
+    ("docs/build/", "x/docs/build/a.html", False),  # a slash in the middle anchors it
+    ("LICENSE", "LICENSE.md", False),
+])
+def test_forbidden_paths_read_like_gitignore(pattern, path, hit):
+    assert path_matches(path, [pattern]) is hit
 
 
 def test_subject_is_deterministic_and_normalized():

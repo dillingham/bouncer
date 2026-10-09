@@ -25,7 +25,7 @@ checks:                         # deterministic, no AI involved
   require_linked_issue: true
   max_changed_lines: 0          # 0 = no limit
   max_author_prs_24h: 0         # 0 = no limit; PRs the author opened across GitHub in 24h
-  forbidden_paths:
+  forbidden_paths:              # like .gitignore: /x = from the repo root, x/ = a directory, *.lock = at any depth
     - ".github/**"
 
 # Free text for the reviewer: scope, roadmap, things you never accept.

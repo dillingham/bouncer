@@ -221,7 +221,13 @@ def parse(text: str | None) -> Config:
     cfg.max_author_prs_24h = _get(checks, "max_author_prs_24h", int, cfg.max_author_prs_24h)
     if cfg.max_changed_lines < 0 or cfg.max_author_prs_24h < 0:
         raise ConfigError("checks.max_changed_lines and checks.max_author_prs_24h must be 0 (no limit) or more")
-    cfg.forbidden_paths = [str(p) for p in _get(checks, "forbidden_paths", list, cfg.forbidden_paths)]
+    cfg.forbidden_paths = [str(p).strip() for p in _get(checks, "forbidden_paths", list, cfg.forbidden_paths)]
+    for p in cfg.forbidden_paths:
+        # Patterns are read like .gitignore lines (see common.path_matches), minus negation.
+        if not p.strip("/"):
+            raise ConfigError("checks.forbidden_paths has an empty pattern")
+        if p.startswith("!"):
+            raise ConfigError(f"checks.forbidden_paths: negated patterns like {p!r} aren't supported")
 
     cfg.guidance = _get(data, "guidance", str, "").strip()[:8000]
 

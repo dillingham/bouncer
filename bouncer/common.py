@@ -77,8 +77,29 @@ def glob_to_regex(pattern: str) -> re.Pattern:
     return re.compile("^" + "".join(out) + "$")
 
 
+def _path_pattern(pattern: str) -> tuple[re.Pattern, bool]:
+    """A forbidden_paths pattern, read like a .gitignore line: a slash at the start or in the
+    middle anchors it to the repository root (`/vendor`, `.github/**`), a trailing slash matches
+    directories only (`vendor/`), and a pattern with no other slash matches at any depth
+    (`*.lock`, `vendor/`). Returns the regex and whether it only matches directories."""
+    p = pattern.strip()
+    dir_only = p.endswith("/")
+    p = p.rstrip("/")
+    if "/" not in p:
+        p = "**/" + p
+    return glob_to_regex(p.lstrip("/")), dir_only
+
+
 def path_matches(path: str, patterns: list[str]) -> bool:
-    return any(glob_to_regex(p).match(path) for p in patterns)
+    """Whether a changed file matches a forbidden_paths pattern, itself or through any of its
+    directories (as in .gitignore, a matching directory covers everything inside it)."""
+    parts = path.split("/")
+    dirs = ["/".join(parts[:i]) for i in range(1, len(parts))]
+    for pattern in patterns:
+        rx, dir_only = _path_pattern(pattern)
+        if any(rx.match(d) for d in dirs) or (not dir_only and rx.match(path)):
+            return True
+    return False
 
 
 class GitHubError(RuntimeError):
