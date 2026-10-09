@@ -15,13 +15,28 @@ from bouncer.render import parse_state
 
 # --- agent -------------------------------------------------------------------
 class FakeMessages:
+    """client.messages: each stream() call answers with the next scripted message (or raises it)."""
+
     def __init__(self, script):
         self.script = list(script)
         self.calls = []
 
-    def create(self, **kw):
+    def stream(self, **kw):
         self.calls.append(json.loads(json.dumps(kw, default=lambda o: o.__dict__)))
-        return self.script.pop(0)
+        answer = self.script.pop(0)
+
+        class Stream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def get_final_message(self):
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        return Stream()
 
 
 def resp(*blocks, stop="tool_use"):
@@ -517,18 +532,22 @@ def test_forged_state_comment_ignored():
 
 
 # --- review entry point, end to end with fakes --------------------------------
-def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
+UPSTREAM_CFG = "review: {model: claude-sonnet-5-5, effort: medium}\n"
+
+
+@pytest.fixture
+def review_run(tmp_path, monkeypatch):
+    """`bouncer.review run` against a fake GitHub and a fake Anthropic client. Call it with the
+    model's scripted answers; it returns the fake messages API."""
     import anthropic
 
     from bouncer import review as review_mod
-    from bouncer.common import subject_digest, subject_name
 
     base, head, out = tmp_path / "base", tmp_path / "head", tmp_path / "out"
     for d in (base, head):
         (d / "src").mkdir(parents=True)
         (d / "src/a.py").write_text("def f():\n    return 1\n")
     # The settings come from the upstream default branch (what the gate reads), not the PR's base checkout.
-    upstream_cfg = "review: {model: claude-sonnet-5-5, effort: medium}\n"
     (base / ".bouncer.yml").write_text("review: {model: claude-haiku-5-5, effort: low}\n")
     sha = "f" * 40
     pr = {"number": 5, "title": "Fix f", "body": "Fixes #1", "head": {"sha": sha}, "user": {"login": "x"}}
@@ -541,7 +560,7 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
 
         def get_or_none(self, path, accept=None):
             if path == "/repos/Up/Repo/contents/.bouncer.yml":
-                return upstream_cfg
+                return UPSTREAM_CFG
             return {"state": "open", "title": "bug", "body": "f is wrong"}
 
     monkeypatch.setattr(review_mod, "GitHub", GH)
@@ -549,15 +568,6 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
         "author": "x", "author_association": "NONE", "author_created_at": None, "author_prs_24h": 1,
         "additions": 1, "deletions": 1, "changed_lines": 2, "changed_files": [{"path": "src/a.py", "status": "modified", "additions": 1, "deletions": 1}],
         "linked_issues": [{"number": 1, "state": "open", "title": "bug"}]})
-    rules = all_verdicts()
-    rules[[r["id"] for r in rules].index("correct")] = verdict(
-        "correct", "fail", "returns wrong value", [{"root": "head", "path": "src/a.py", "line": 2, "quote": "return 1"}])
-    submit = {"summary": "Looks right.", "rules": rules, "injection_detected": False, "injection_notes": ""}
-    msgs = FakeMessages([
-        resp(tool("t0", "read_file", {"root": "head", "path": "src/a.py", "start_line": 1, "end_line": 0})),
-        resp(tool("t", "submit_review", submit)),
-    ])
-    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: NS(messages=msgs, kw=kw))
     gh_out = tmp_path / "gh_output"
     summary = tmp_path / "summary.md"
     summary.write_text("")
@@ -566,13 +576,35 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("GITHUB_REPOSITORY", "fork/repo")
 
-    review_mod.main(["run", "--pr", "5", "--upstream", "Up/Repo", "--head-repo", "fork/repo", "--base-sha", "b" * 40,
-                     "--head-sha", sha, "--base-dir", str(base), "--head-dir", str(head), "--out-dir", str(out)])
+    def run(script):
+        msgs = FakeMessages(script)
+        monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: NS(messages=msgs, kw=kw))
+        review_mod.main(["run", "--pr", "5", "--upstream", "Up/Repo", "--head-repo", "fork/repo", "--base-sha", "b" * 40,
+                         "--head-sha", sha, "--base-dir", str(base), "--head-dir", str(head), "--out-dir", str(out)])
+        return msgs
+
+    run.out, run.gh_out, run.summary, run.sha = out, gh_out, summary, sha
+    return run
+
+
+def test_review_run_writes_signed_payload(review_run, capsys):
+    from bouncer import review as review_mod
+    from bouncer.common import subject_digest, subject_name
+
+    out, gh_out, summary, sha = review_run.out, review_run.gh_out, review_run.summary, review_run.sha
+    rules = all_verdicts()
+    rules[[r["id"] for r in rules].index("correct")] = verdict(
+        "correct", "fail", "returns wrong value", [{"root": "head", "path": "src/a.py", "line": 2, "quote": "return 1"}])
+    submit = {"summary": "Looks right.", "rules": rules, "injection_detected": False, "injection_notes": ""}
+    msgs = review_run([
+        resp(tool("t0", "read_file", {"root": "head", "path": "src/a.py", "start_line": 1, "end_line": 0})),
+        resp(tool("t", "submit_review", submit)),
+    ])
 
     p = json.loads((out / "predicate.json").read_text())
     assert p["model"] == "claude-sonnet-5-5" and msgs.calls[0]["model"] == "claude-sonnet-5-5"
     assert msgs.calls[0]["output_config"] == {"effort": "medium"}
-    assert p["config_digest"] == config.parse(upstream_cfg).digest and p["protocol"] == REVIEW_PROTOCOL
+    assert p["config_digest"] == config.parse(UPSTREAM_CFG).digest and p["protocol"] == REVIEW_PROTOCOL
     assert p["review"]["rules"][[r["id"] for r in p["review"]["rules"]].index("correct")]["evidence"][0]["verified"] is True
     name = subject_name("Up/Repo", 5, sha)
     outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())
@@ -590,6 +622,17 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
     outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())
     assert outputs["verdict"] == "fail"
     assert "Bounced" in (out / "report.md").read_text() and "Bounced" in summary.read_text()
+
+
+def test_review_streams_and_reports_connection_errors_cleanly(review_run, capsys):
+    import anthropic
+
+    down = anthropic.APIConnectionError(request=None)
+    with pytest.raises(SystemExit) as e:
+        review_run([down])
+    out = capsys.readouterr().out
+    assert e.value.code == 1 and "::error::" in out and "Traceback" not in out
+    assert not (review_run.out / "predicate.json").exists()
 
 
 def test_prior_contributors_reviewed_unless_exempted():

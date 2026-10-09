@@ -285,7 +285,9 @@ class Agent:
 
     # --- loop ------------------------------------------------------------
     def _create(self, system, messages):
-        return self.client.messages.create(
+        # Streamed, then collected: a long thinking turn can outlast a plain request's HTTP
+        # timeout, and the SDK refuses non-streaming requests this large for that reason.
+        with self.client.messages.stream(
             model=self.model,
             max_tokens=32_000,
             system=system,
@@ -293,7 +295,8 @@ class Agent:
             tools=[{**t, "strict": True} for t in TOOLS],
             tool_choice={"type": "auto"},
             output_config={"effort": self.effort},
-        )
+        ) as stream:
+            return stream.get_final_message()
 
     def run(self, system: str, user_content: list, rule_ids: list[str]) -> dict:
         messages: list = [{"role": "user", "content": list(user_content)}]

@@ -181,6 +181,8 @@ def cmd_run(args) -> None:
         fail("Anthropic rejected the API key. Check the ANTHROPIC_API_KEY secret in your fork.")
     except anthropic.APIStatusError as e:
         fail(f"Anthropic API error {e.status_code}: {str(e)[:300]}")
+    except anthropic.APIError as e:  # connection errors and timeouts, after the client's retries
+        fail(f"Couldn't reach the Anthropic API: {str(e)[:300]}")
     verify_evidence(review, ws)
 
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
