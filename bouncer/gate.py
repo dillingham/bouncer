@@ -176,15 +176,29 @@ class Gate:
             self._add_label(n, add)
             current.add(add)
 
-    def _draft(self, pr: dict, draft: bool) -> None:
+    def _draft(self, pr: dict, draft: bool) -> bool:
+        """Convert to a draft, or mark ready for review. True if this call changed it."""
         mutation = "convertPullRequestToDraft" if draft else "markPullRequestReadyForReview"
         if bool(pr.get("draft")) == draft:
-            return
+            return False
         try:
             self.gh.graphql(f"mutation($id:ID!){{{mutation}(input:{{pullRequestId:$id}}){{clientMutationId}}}}",
                             {"id": pr["node_id"]})
         except GitHubError as e:
             self.log(f"  could not {'convert to draft' if draft else 'mark ready'} (labels still apply): {e}")
+            return False
+        pr["draft"] = draft
+        return True
+
+    def _hold(self, pr: dict, state: dict) -> None:
+        """Make the pull request a draft while its review is pending, noting that the gate did."""
+        if self._draft(pr, True):
+            state["drafted"] = True
+
+    def _release(self, pr: dict, state: dict) -> None:
+        """Undo the gate's own draft conversion. A draft the contributor made stays a draft."""
+        if state.pop("drafted", False):
+            self._draft(pr, False)
 
     def _comment(self, n: int, body: str) -> None:
         self.gh.post(f"/repos/{self.repo}/issues/{n}/comments", {"body": body[:65000]})
@@ -313,7 +327,8 @@ class Gate:
         if why:
             if L_PENDING in labels:
                 self._set_labels(n, labels, None)
-                self._draft(pr, False)
+                if (find_state(self.gh, self.repo, n)[1] or {}).get("drafted"):
+                    self._draft(pr, False)
             self.log(f"#{n}: exempt ({why})")
             return "exempt"
 
@@ -321,6 +336,9 @@ class Gate:
         self._persisted[n] = _snapshot(state)
         head_sha = pr["head"]["sha"]
         head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name", "")
+        # A draft the contributor made (not the gate's hold) is still being worked on: no review is
+        # asked for and no deadline runs until it's marked ready for review.
+        wip = bool(pr.get("draft")) and not (state or {}).get("drafted")
 
         # Deterministic pre-check, before a review is asked for or looked at.
         base = (pr.get("base") or {}).get("ref", "")
@@ -332,9 +350,9 @@ class Gate:
         if state and state.get("sha") == head_sha and action == "reopened" and state.get("status") in ("fail", "exhausted"):
             if self._is_maintainer(sender or ""):
                 state["status"] = "override"
+                self._release(pr, state)
                 self._save_state(n, sticky, "### 🚪 Bouncer\n\nReopened by a maintainer, so the bouncer verdict is set aside.", state)
                 self._set_labels(n, labels, None)
-                self._draft(pr, False)
                 return "override"
             self._comment(n, "### 🚪 Bouncer\n\nThis commit was already bounced. Push fixes, reopen, then run the review again.")
             self._close(n)
@@ -353,7 +371,9 @@ class Gate:
         retry_expired = bool(state) and action == "reopened" and state.get("status") == "expired"
         # So does one that was bounced for its base branch, once it targets an allowed one.
         retarget = bool(state) and state.get("status") == "wrong_base"
-        if state is None or state.get("sha") != head_sha or retry_expired or retarget:
+        # And a draft once it's marked ready.
+        was_draft = bool(state) and state.get("status") == "draft"
+        if state is None or state.get("sha") != head_sha or retry_expired or retarget or was_draft:
             prev = state or {}
             if prev.get("status") == "pass" and not self.cfg.rereview_after_pass:
                 prev["sha"] = head_sha
@@ -361,6 +381,15 @@ class Gate:
                 return "kept-pass"
             if not head_repo:
                 return self._no_fork(n, sticky, prev, labels, head_sha)
+            if wip:
+                if not was_draft:
+                    state = {"v": 1, "sha": head_sha, "status": "draft",
+                             "rounds": int(prev.get("rounds", 0)), "fails": int(prev.get("fails", 0))}
+                    self._save_state(n, sticky, "### 🚪 Bouncer\n\nThis pull request is a draft. Once it's marked ready "
+                                     "for review, the bouncer asks for a review here.", state)
+                    self._set_labels(n, labels, None)
+                self.log(f"#{n}: draft, waiting until it's ready for review")
+                return "draft"
             fails = int(prev.get("fails", 0))
             if fails >= self.cfg.max_attempts:
                 state = {**prev, "sha": head_sha, "status": "exhausted"}
@@ -375,21 +404,25 @@ class Gate:
                 "status": "pending",
                 "rounds": int(prev.get("rounds", 0)) + 1,
                 "fails": fails,
+                **({"drafted": True} if prev.get("drafted") else {}),
             }
+            self._hold(pr, state)
             sticky = self._save_state(n, sticky, self._instructions(n, head_repo, state), state)
             self._set_labels(n, labels, L_PENDING)
-            self._draft(pr, True)
             self.log(f"#{n}: review requested for {head_sha[:12]}")
-        elif state.get("status") == "pending" and action == "ready_for_review":
-            self._draft(pr, True)
-        elif (state.get("status") == "pending" and action == "reopened" and head_repo
-              and self.now >= self._deadline(state)):
-            # Closed while waiting (by the contributor, say) and reopened after the deadline: a
-            # fresh deadline instead of closing it again on the spot. Same commit, so same round.
+        elif state.get("status") == "pending" and action == "ready_for_review" and state.get("drafted"):
+            self._draft(pr, True)  # marked ready while the gate holds it: back to a draft until it passes
+        elif state.get("status") == "pending" and head_repo and (
+                (action == "ready_for_review")  # a draft the contributor made while it was pending
+                or (action == "reopened" and self.now >= self._deadline(state))):
+            # A fresh deadline rather than closing it on the spot: it's ready for review again, or
+            # was closed while waiting (by the contributor, say) and reopened after the deadline.
+            # Same commit, so same round.
             state["requested_at"] = self.now.strftime(ISO)
+            self._hold(pr, state)
             self._save_state(n, sticky, self._instructions(n, head_repo, state, STALE_NOTES.get(state.get("stale"), "")), state)
             self._set_labels(n, labels, L_PENDING)
-            self.log(f"#{n}: reopened after the deadline; new deadline")
+            self.log(f"#{n}: new deadline ({action})")
 
         if state.get("status") != "pending":
             return state.get("status", "")
@@ -410,7 +443,7 @@ class Gate:
         stale = self._stale(found[-1].predicate) if found and not valid else None
         if stale:
             self.log(f"#{n}: signed review doesn't count ({stale})")
-        expired = not valid and self.now >= self._deadline(state)
+        expired = not valid and not wip and self.now >= self._deadline(state)
         if not (valid or expired or (stale and state.get("stale") != stale)):
             self.log(f"#{n}: waiting for review")
             return "pending"
@@ -474,7 +507,8 @@ class Gate:
                    if self.cfg.close_on_fail else "Change the base branch, then comment `/bouncer check`.")
             prev = state or {}
             state = {"v": 1, "sha": head_sha, "status": "wrong_base", "base": base,
-                     "rounds": int(prev.get("rounds", 0)), "fails": int(prev.get("fails", 0))}
+                     "rounds": int(prev.get("rounds", 0)), "fails": int(prev.get("fails", 0)),
+                     **({"drafted": True} if prev.get("drafted") else {})}
             self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ Bounced: this pull request targets `{clean(base, 200)}`, "
                              f"but this project only takes outside pull requests {target}. {fix}", state)
         self._set_labels(n, labels, L_FAIL)
@@ -494,9 +528,9 @@ class Gate:
         state["run"] = f.run
         state.pop("stale", None)
         if d.outcome == "pass":
+            self._release(pr, state)
             self._save_state(n, sticky, "### 🚪 Bouncer\n\n✅ Passed. Ready for a maintainer.", state)
             self._set_labels(n, labels, L_PASS)
-            self._draft(pr, False)
         else:
             state["fails"] = int(state.get("fails", 0)) + 1
             left = self.cfg.max_attempts - state["fails"]

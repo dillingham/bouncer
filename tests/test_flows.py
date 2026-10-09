@@ -169,6 +169,7 @@ class FakeGitHub:
         # compare API of the action repo: signer commit -> status against the gate's ref
         self.compare = {SIGNER: "ahead"}
         self.compare_calls = []
+        self.draft_refused = False  # GitHub may refuse convertPullRequestToDraft for the Actions token
 
     def see(self, pr):
         """The pull request is now at this head/base and open (or closed). Labels and draft state
@@ -258,6 +259,8 @@ class FakeGitHub:
         self.graphql_calls.append(q)
         n = int(v["id"].split("_")[1])
         if "convertPullRequestToDraft" in q:
+            if self.draft_refused:
+                raise GitHubError(403, "Resource not accessible by integration")
             self.drafts[n] = True
         elif "markPullRequestReadyForReview" in q:
             self.drafts[n] = False
@@ -465,6 +468,48 @@ def test_settings_digest_ignores_gate_only_settings():
     cfg = "gate: {deadline_hours: 72}\nchecks: {max_changed_lines: 500}"
     gate(gh, cfg_text=cfg).process(make_pr(), action="opened")
     assert gate(gh, verifier=lambda r, s: [found("pass")], cfg_text=cfg).process(make_pr()) == "pass"
+
+
+def test_contributor_draft_waits_until_ready():
+    gh = FakeGitHub()
+    assert gate(gh).process(make_pr(draft=True), action="opened") == "draft"
+    st = gh.state(7)
+    assert st["status"] == "draft" and "requested_at" not in st and gh.labels[7] == set()
+    assert "draft" in gh.bodies(7)[0] and "gh bouncer" not in gh.bodies(7)[0]
+    # no clock while it's a draft: never closed for not being reviewed, and pushes change nothing
+    later = T0 + dt.timedelta(hours=72)
+    assert gate(gh, now=later).process(make_pr(draft=True)) == "draft"
+    assert gate(gh, now=later).process(make_pr(sha=B, draft=True), action="synchronize") == "draft"
+    assert 7 not in gh.closed and len(gh.bodies(7)) == 1
+    # marked ready: the round starts now, and the bouncer holds it as a draft until it passes
+    gh.drafts[7] = False
+    assert gate(gh, now=later).process(make_pr(sha=B), action="ready_for_review") == "pending"
+    st = gh.state(7)
+    assert st["requested_at"] == later.strftime("%Y-%m-%dT%H:%M:%SZ") and st["rounds"] == 1 and st["drafted"]
+    assert gh.labels[7] == {"bouncer:pending"} and gh.drafts[7] is True
+    # its own draft is not the contributor's: the deadline applies, and a pass undoes it
+    assert gate(gh, verifier=lambda r, s: [found("pass", sha=B)], now=later).process(make_pr(sha=B)) == "pass"
+    assert gh.drafts[7] is False and "drafted" not in gh.state(7)
+
+
+def test_only_the_bouncers_own_draft_is_undone():
+    gh = FakeGitHub()
+    gh.draft_refused = True
+    gate(gh).process(make_pr(), action="opened")
+    assert "drafted" not in gh.state(7)
+    gh.drafts[7] = True  # the contributor makes it a draft while it's pending
+    assert gate(gh, now=T0 + dt.timedelta(hours=49)).process(make_pr()) == "pending"  # not closed
+    assert gate(gh, verifier=lambda r, s: [found("pass")]).process(make_pr()) == "pass"
+    assert gh.drafts[7] is True and not any("markPullRequestReadyForReview" in q for q in gh.graphql_calls)
+    # marked ready while pending: a fresh deadline from then
+    gh = FakeGitHub()
+    gh.draft_refused = True
+    gate(gh).process(make_pr(), action="opened")
+    gh.drafts[7] = True
+    later = T0 + dt.timedelta(hours=60)
+    gh.drafts[7] = False
+    assert gate(gh, now=later).process(make_pr(), action="ready_for_review") == "pending"
+    assert gh.state(7)["requested_at"] == later.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_deadline_expires():
