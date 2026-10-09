@@ -11,7 +11,7 @@
 #
 # Nothing before the signing step may reveal the verdict (logs, step summary, outputs).
 # Otherwise a contributor could cancel runs heading for a bounce before they are signed
-# and retry until one passes. The Report step shows it once the attestation exists.
+# and retry until one passes. The "Show the result" step shows it once the attestation exists.
 name: Bouncer review (reusable)
 
 on:
@@ -34,6 +34,7 @@ on:
 
 jobs:
   review:
+    name: Review pull request
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
@@ -44,7 +45,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Locate bouncer source
+      - name: Find bouncer
         id: self
         shell: python
         run: |
@@ -67,14 +68,15 @@ jobs:
           path: .bouncer
           persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Install
+      - name: Install bouncer
         run: pip install --disable-pip-version-check -q -r .bouncer/requirements.txt
 
-      - name: Resolve pull request
+      - name: Find the pull request
         id: pr
         working-directory: .bouncer
         env:
@@ -84,7 +86,7 @@ jobs:
           UPSTREAM: ${{ inputs.upstream }}
         run: python -m bouncer.review resolve --pr "$PR" --upstream "$UPSTREAM"
 
-      - name: Check out upstream base branch (read only)
+      - name: Check out the base branch (read only)
         if: steps.pr.outputs.skip != 'true'
         uses: actions/checkout@v5
         with:
@@ -95,7 +97,7 @@ jobs:
           lfs: false
           submodules: false
 
-      - name: Check out pull request head (read only, never executed)
+      - name: Check out the pull request (read only, never run)
         if: steps.pr.outputs.skip != 'true'
         uses: actions/checkout@v5
         with:
@@ -106,7 +108,7 @@ jobs:
           lfs: false
           submodules: false
 
-      - name: Review
+      - name: Review (on your Anthropic key)
         if: steps.pr.outputs.skip != 'true'
         id: review
         working-directory: .bouncer
@@ -126,7 +128,7 @@ jobs:
           --base-dir "$GITHUB_WORKSPACE/work/base" --head-dir "$GITHUB_WORKSPACE/work/head"
           --out-dir "$GITHUB_WORKSPACE/out"
 
-      - name: Sign the review
+      - name: Sign the review (GitHub attestation)
         if: steps.pr.outputs.skip != 'true'
         uses: actions/attest@v4
         with:
@@ -135,13 +137,13 @@ jobs:
           predicate-type: https://github.com/gh-bouncer/action/attestation/review/v1
           predicate-path: out/predicate.json
 
-      - name: Report
+      - name: Show the result
         if: steps.pr.outputs.skip != 'true'
         id: report
         working-directory: .bouncer
         run: python -m bouncer.review report --out-dir "$GITHUB_WORKSPACE/out"
 
-      - name: Keep the report
+      - name: Save the report
         if: steps.pr.outputs.skip != 'true'
         uses: actions/upload-artifact@v5
         with:

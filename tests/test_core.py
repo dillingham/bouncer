@@ -63,6 +63,19 @@ def test_unknown_settings_warn():
     assert cfg.digest == config.parse("rules: [{id: a, description: x}]").digest
 
 
+def test_workflow_names():
+    import yaml
+
+    t = yaml.safe_load((ROOT / "templates/bouncer.yml").read_text())
+    # gh bouncer finds a dispatched review by its run name ending in "#<pr>"
+    assert "format('Bouncer review · PR #{0}', inputs.pr)" in t["run-name"]
+    assert "format('Bouncer gate · PR #{0}'" in t["run-name"]
+    assert t["jobs"]["gate"]["name"] == "Bouncer gate" and t["jobs"]["review"]["name"] == "Bouncer review"
+    steps = yaml.safe_load((ROOT / ".github/workflows/review.yml").read_text())["jobs"]["review"]["steps"]
+    names = [st["name"] for st in steps]
+    assert names[-3:] == ["Sign the review (GitHub attestation)", "Show the result", "Save the report"]
+
+
 def test_target_branches():
     assert config.parse("").target_branches == []  # = the default branch only
     assert config.parse("checks: {target_branches: [main, ' release/2.x ']}").target_branches == ["main", "release/2.x"]

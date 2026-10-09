@@ -2,6 +2,14 @@
 # In this repository, the gate holds outside pull requests until they pass a signed review.
 # In forks, the review runs on the contributor's own ANTHROPIC_API_KEY (via `gh bouncer`).
 name: Bouncer
+# Fork runs: "Bouncer review · PR #7" (gh bouncer finds its run by this), or "Bouncer review" on a push.
+# Upstream runs: "Bouncer gate · PR #7", or "Bouncer gate" for the scheduled check of all waiting PRs.
+run-name: >-
+  ${{ github.event.repository.fork
+      && (inputs.pr && format('Bouncer review · PR #{0}', inputs.pr) || 'Bouncer review')
+      || ((github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) || inputs.pr)
+          && format('Bouncer gate · PR #{0}', github.event.pull_request.number || github.event.issue.number || inputs.pr)
+          || 'Bouncer gate') }}
 
 on:
   pull_request_target:
@@ -26,6 +34,7 @@ permissions: {}
 
 jobs:
   gate:
+    name: Bouncer gate
     if: >-
       !github.event.repository.fork && (
         github.event_name == 'pull_request_target' ||
@@ -46,6 +55,7 @@ jobs:
       - uses: gh-bouncer/action@v1
 
   review:
+    name: Bouncer review
     if: github.event.repository.fork && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
