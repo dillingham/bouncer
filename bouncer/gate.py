@@ -37,6 +37,10 @@ def _fmt_deadline(t: dt.datetime) -> str:
     return t.strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _snapshot(state: dict | None) -> str:
+    return json.dumps(state, sort_keys=True)
+
+
 @dataclass
 class Found:
     ts: int
@@ -118,6 +122,7 @@ class Gate:
         self.action_repo = action_repo
         self.action_ref = action_ref
         self._signer_ok: dict[str, bool] = {}  # signer commit -> in the gate's history (per run)
+        self._persisted: dict[int, str] = {}  # PR -> the state as last read or written by this run
         self._labels_ready = False
 
     # --- GitHub helpers ---------------------------------------------------
@@ -168,10 +173,28 @@ class Gate:
 
     def _save_state(self, n: int, sticky: dict | None, text: str, state: dict) -> dict:
         body = f"{text}\n\n{state_block(state)}"
+        self._persisted[n] = _snapshot(state)
         if sticky:
             self.gh.patch(f"/repos/{self.repo}/issues/comments/{sticky['id']}", {"body": body})
             return sticky
         return self.gh.post(f"/repos/{self.repo}/issues/{n}/comments", {"body": body})
+
+    def _unchanged(self, n: int, sticky: dict | None, head_sha: str) -> dict | None:
+        """Re-read the state comment and the pull request right before acting on a review or the
+        deadline. The sweep and per-PR runs are in different concurrency groups, and looking for a
+        review can take minutes, so another run may have started a new round, applied this same
+        review or closed the pull request meanwhile. Returns the fresh pull request, or None if
+        anything changed, in which case that other run's result stands."""
+        current = None
+        if sticky:
+            c = self.gh.get_or_none(f"/repos/{self.repo}/issues/comments/{sticky['id']}")
+            current = parse_state([c] if c else [])[1]
+        pr = self.gh.get(f"/repos/{self.repo}/pulls/{n}")
+        if (_snapshot(current) != self._persisted.get(n) or pr.get("state") != "open"
+                or pr["head"]["sha"] != head_sha):
+            self.log(f"#{n}: another run changed it while this one was looking for a review; leaving it to that run")
+            return None
+        return pr
 
     def _close(self, n: int) -> None:
         self.gh.patch(f"/repos/{self.repo}/pulls/{n}", {"state": "closed"})
@@ -276,6 +299,7 @@ class Gate:
 
         comments = self.gh.paginate(f"/repos/{self.repo}/issues/{n}/comments", limit=500)
         sticky, state = parse_state(comments)
+        self._persisted[n] = _snapshot(state)
         head_sha = pr["head"]["sha"]
         head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name", "")
         if not head_repo:
@@ -346,18 +370,27 @@ class Gate:
         ]
         found = [f for f in found if self._signed_by_gate_history(f)]
         valid = [f for f in found if not self._stale(f.predicate)]
+        # Signed reviews of this commit that don't count. That's not a fail and uses no round:
+        # the contributor is asked to run it again (said once per reason).
+        stale = self._stale(found[-1].predicate) if found and not valid else None
+        if stale:
+            self.log(f"#{n}: signed review doesn't count ({stale})")
+        expired = not valid and self.now >= self._deadline(state)
+        if not (valid or expired or (stale and state.get("stale") != stale)):
+            self.log(f"#{n}: waiting for review")
+            return "pending"
+
+        fresh = self._unchanged(n, sticky, head_sha)
+        if fresh is None:
+            return "changed"
+        pr, labels = fresh, {lb["name"] for lb in fresh.get("labels", [])}
         if valid:
             return self._apply(pr, labels, sticky, state, valid[0], attempts=len(valid))
-        if found:
-            # Signed reviews of this commit that don't count. That's not a fail and uses no round:
-            # the contributor is asked to run it again (said once per reason).
-            why = self._stale(found[-1].predicate)
-            if state.get("stale") != why:
-                state["stale"] = why
-                self._save_state(n, sticky, self._instructions(n, head_repo, state, STALE_NOTES[why]), state)
-            self.log(f"#{n}: signed review doesn't count ({why})")
+        if stale and state.get("stale") != stale:
+            state["stale"] = stale
+            self._save_state(n, sticky, self._instructions(n, head_repo, state, STALE_NOTES[stale]), state)
 
-        if self.now >= self._deadline(state):
+        if expired:
             state["status"] = "expired"
             state["fails"] = int(state.get("fails", 0)) + 1
             self._save_state(n, sticky, "### 🚪 Bouncer\n\nNo signed review arrived before the deadline. Closing. "
@@ -366,7 +399,6 @@ class Gate:
             self._close(n)
             self.log(f"#{n}: expired")
             return "expired"
-        self.log(f"#{n}: waiting for review")
         return "pending"
 
     def _wrong_base(self, pr: dict, labels: set[str], sticky: dict | None, state: dict | None,

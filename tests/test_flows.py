@@ -111,10 +111,11 @@ class FakeGitHub:
         self.compare_calls = []
 
     def see(self, pr):
-        """The pull request is now at this head/base. Labels and draft state come from the payload
-        only the first time; after that the gate's own changes are the truth."""
+        """The pull request is now at this head/base and open (or closed). Labels and draft state
+        come from the payload only the first time; after that the gate's own changes are the truth."""
         n = pr["number"]
         self.prs[n] = copy.deepcopy(pr)
+        (self.closed.discard if pr.get("state") == "open" else self.closed.add)(n)
         self.labels.setdefault(n, {lb["name"] for lb in pr.get("labels", [])})
         self.drafts.setdefault(n, bool(pr.get("draft")))
 
@@ -136,6 +137,9 @@ class FakeGitHub:
         if "/collaborators/" in path:
             user = path.split("/")[5]
             return {"permission": "write" if user in self.maintainers else "read"}
+        if "/issues/comments/" in path:
+            cid = int(path.rsplit("/", 1)[1])
+            return next((dict(c) for cs in self.comments.values() for c in cs if c["id"] == cid), None)
         return None
 
     def get(self, path, accept=None):
@@ -267,6 +271,35 @@ def test_queued_event_reads_the_pr_fresh_not_its_payload():
     assert gh.state(7)["sha"] == B and gh.state(7)["status"] == "pending"
     assert gh.labels[7] == {"bouncer:pending"}  # the pass label is gone from the unreviewed commit
     assert any("convertPullRequestToDraft" in q for q in gh.graphql_calls[before:])
+
+
+def test_sweep_does_not_overwrite_a_round_started_meanwhile():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(sha=A), action="opened")
+
+    def sweep_verifier(head_repo, name):
+        # While the sweep (holding the PR at A) waits on `gh attestation verify`, a synchronize
+        # run for B (a different concurrency group) starts a new round.
+        gate(gh).process(make_pr(sha=B), action="synchronize")
+        return [found("pass", sha=A)]
+
+    assert gate(gh, verifier=sweep_verifier).process(make_pr(sha=A)) == "changed"
+    st = gh.state(7)
+    assert st["sha"] == B and st["status"] == "pending" and gh.labels[7] == {"bouncer:pending"}
+
+
+def test_sweep_and_check_run_post_one_verdict():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+
+    def sweep_verifier(head_repo, name):
+        # gh bouncer's `/bouncer check` run (group bouncer-gate-7) overlaps the sweep (bouncer-gate-sweep).
+        gate(gh, verifier=lambda r, s: [found("fail")]).process(make_pr())
+        return [found("fail")]
+
+    assert gate(gh, verifier=sweep_verifier).process(make_pr()) == "changed"
+    assert len([b for b in gh.bodies(7) if b.startswith("### ⛔ Bouncer review")]) == 1
+    assert gh.state(7)["fails"] == 1
 
 
 def test_fail_closes_and_counts_round():
