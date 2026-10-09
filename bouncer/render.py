@@ -175,6 +175,10 @@ STALE_NOTES = {
     "protocol": "Your signed review doesn't count: it was made with an outdated version of the bouncer review. "
                 "Run the review again with the command below. If this note comes back, sync your fork's default "
                 "branch with this repository first. This doesn't use up a review attempt.",
+    "signer": "Your signed review doesn't count: it was made by a version of the bouncer review that this project's "
+              "bouncer doesn't accept. Run the review again with the command below, which syncs your fork's default "
+              "branch with this repository first. If this note comes back, let the maintainers know: their bouncer may "
+              "be pinned to an older version than the review it runs. This doesn't use up a review attempt.",
 }
 
 

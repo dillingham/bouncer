@@ -52,7 +52,7 @@ Run `gh bouncer init` in the project (or `gh bouncer init -R owner/repo`). It op
 
 Members, collaborators, listed bots (`exempt_users`, any case), and any PR labeled `bouncer:skip` are exempt. Prior contributors are not by default (`exempt_prior_contributors`), since one merged PR would exempt everything its author opens afterwards. Reopening a bounced PR yourself overrides the verdict, for later commits too.
 
-Reviews only count when signed by a `review.yml` commit in the history of the gate's own version. Keep the gate (`gh-bouncer/action@v1`) and the review (`review.yml@v1`) on the same line: pinning the gate to an older commit makes reviews from newer ones not count.
+Reviews only count when signed by a `review.yml` commit in the history of the gate's own version. Keep the gate (`gh-bouncer/action@v1`) and the review (`review.yml@v1`) on the same line: pinning the gate to an older commit makes reviews from newer ones not count, and the bouncer's comment then asks contributors to let you know.
 
 Prefer to do it by hand? Copy `templates/bouncer.yml` to `.github/workflows/bouncer.yml` and `templates/.bouncer.yml` to the repo root.
 
@@ -62,7 +62,7 @@ The bouncer's comment has one instruction: install the extension and run `gh bou
 
 A bounce report ends with the reasons and how to try again. A review that fails before it's signed (a rejected key, no credits, an API outage, the turn budget running out) ends with an error that says what to do, and doesn't use up a review attempt.
 
-If the maintainers change the review settings (model, effort, turns, guidance or rules) after a review ran, or the review was made with an outdated version of bouncer, it doesn't count: the bouncer's comment says so and asks the contributor to run `gh bouncer` again. That doesn't use up a review attempt either.
+If the maintainers change the review settings (model, effort, turns, guidance or rules) after a review ran, or the review was made with a version of bouncer the gate doesn't accept (an outdated one, or one newer than a pinned gate), it doesn't count: the bouncer's comment says so and asks the contributor to run `gh bouncer` again. That doesn't use up a review attempt either.
 
 In a fork of a fork, the review looks for the PR in the fork's parent, then in the root of the fork network; the workflow's `upstream` input names the repository directly.
 

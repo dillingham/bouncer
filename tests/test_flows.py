@@ -562,6 +562,9 @@ def test_review_signed_from_imposter_commit_does_not_count():
     assert st["status"] == "pending" and st["fails"] == 0 and 7 not in gh.closed  # no valid review, not a fail
     assert any("not in the history of gh-bouncer/action@v1" in line for line in logs)
     assert gh.compare_calls == [f"/repos/gh-bouncer/action/compare/{IMPOSTER}...v1?per_page=1"]  # cached per commit
+    # the contributor (and gh bouncer) are told it didn't count
+    assert st["note"] == "outdated" and st["stale"] == "signer" and len(gh.bodies(7)) == 1
+    assert "made by a version of the bouncer review that this project's bouncer doesn't accept" in gh.bodies(7)[0]
     # a real review after it counts, even though the imposter one came first
     assert gate(gh, verifier=lambda r, s: [imposter, found("fail", ts=2)]).process(make_pr()) == "fail"
 
@@ -577,6 +580,21 @@ def test_signer_commit_must_be_in_gate_history(status, outcome):
     late = T0 + dt.timedelta(hours=49)
     assert gate(gh, verifier=lambda r, s: [found("pass")], now=late).process(make_pr()) == \
         {"pending": "expired"}.get(outcome, outcome)
+
+
+def test_review_from_a_newer_review_commit_is_explained():
+    # The fork's workflow runs review.yml@v1, while the gate is pinned to an older commit.
+    gh = FakeGitHub()
+    gh.compare[SIGNER] = "behind"
+    gate(gh).process(make_pr(), action="opened")
+    g = gate(gh, verifier=lambda r, s: [found("pass")], now=T0 + dt.timedelta(hours=1))
+    assert g.process(make_pr()) == "pending"
+    st = gh.state(7)
+    assert st["note"] == "outdated" and st["fails"] == 0 and "deadline" in st
+    assert "let the maintainers know" in gh.bodies(7)[0] and "gh bouncer https://github.com/up/repo/pull/7" in gh.bodies(7)[0]
+    # said once: the next run with the same review changes nothing
+    body = gh.bodies(7)[0]
+    assert g.process(make_pr()) == "pending" and gh.bodies(7) == [body]
 
 
 def test_signer_uri_must_be_the_bouncer_review_workflow():

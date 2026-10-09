@@ -34,7 +34,7 @@ LABELS = {  # name: (color, description)
 }
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 # Why a signed review didn't count (state "stale", see Gate._stale), as the state's "note" for the CLI.
-STALE_STATE_NOTES = {"config": "config_changed", "protocol": "outdated"}
+STALE_STATE_NOTES = {"config": "config_changed", "protocol": "outdated", "signer": "outdated"}
 ISO = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -321,8 +321,10 @@ class Gate:
     def _deadline(self, state: dict) -> dt.datetime:
         return _parse_time(state["requested_at"]) + dt.timedelta(hours=self.cfg.deadline_hours)
 
-    def _stale(self, predicate: dict) -> str | None:
-        """Why a signed review of the right commit doesn't count, or None if it does."""
+    def _stale(self, f: Found) -> str | None:
+        """Why a signed review of the right commit doesn't count, or None if it does. Raises
+        VerifyError if GitHub can't say whether its signer commit is in the gate's history."""
+        predicate = f.predicate
         try:
             protocol = int(predicate.get("protocol") or 0)
         except (TypeError, ValueError):
@@ -331,6 +333,8 @@ class Gate:
             return "protocol"  # made by an outdated version of the review
         if predicate.get("config_digest") != self.cfg.digest:
             return "config"  # made with other settings than the maintainers' current ones
+        if not self._signed_by_gate_history(f):
+            return "signer"  # by a review.yml commit the gate doesn't accept: newer, or not bouncer's
         return None
 
     def _url(self, n: int) -> str:
@@ -493,6 +497,7 @@ class Gate:
             return self._no_fork(n, sticky, state, labels, head_sha)
         try:
             found = self._signed_reviews(n, head_repo, head_sha, pr["head"]["repo"].get("id"))
+            why = [self._stale(f) for f in found]
         except VerifyError as e:
             # Not the same as no review: one may well exist. Try again next run, and don't let the
             # deadline close the pull request on an outage.
@@ -502,10 +507,10 @@ class Gate:
                 state["note"] = "verify_error"  # for `gh bouncer`, which waits on the verdict
                 self._save_state(n, sticky, self._instructions(n, head_repo, state), state)
             return "verify-error"
-        valid = [f for f in found if not self._stale(f.predicate)]
+        valid = [f for f, stale in zip(found, why) if not stale]
         # Signed reviews of this commit that don't count. That's not a fail and uses no round:
         # the contributor is asked to run it again (said once per reason).
-        stale = self._stale(found[-1].predicate) if found and not valid else None
+        stale = why[-1] if found and not valid else None
         if stale:
             self.log(f"#{n}: signed review doesn't count ({stale})")
         expired = not valid and not wip and self.now >= self._deadline(state)
@@ -561,9 +566,8 @@ class Gate:
         return "closed-no-fork"
 
     def _signed_reviews(self, n: int, head_repo: str, head_sha: str, head_repo_id) -> list[Found]:
-        """Verified reviews of exactly this PR and commit, made in the pull request's fork and
-        signed by the bouncer's review.yml from the gate's own history, earliest first. Raises
-        VerifyError if that can't be determined.
+        """Verified reviews of exactly this PR and commit, made in the pull request's fork,
+        earliest first. Whether each one counts is up to Gate._stale.
 
         The fork is matched by the repository id in the signing certificate, not by its name: a
         review signed before the fork was renamed is still this fork's, and still comes first."""
@@ -574,7 +578,7 @@ class Gate:
             and f.predicate.get("head_sha") == head_sha
             and f.repo_id and f.repo_id == str(head_repo_id)
         ]
-        return sorted((f for f in found if self._signed_by_gate_history(f)), key=lambda f: f.ts)
+        return sorted(found, key=lambda f: f.ts)
 
     def _wrong_base(self, pr: dict, labels: set[str], sticky: dict | None, state: dict | None,
                     base: str, allowed: list[str]) -> str:
