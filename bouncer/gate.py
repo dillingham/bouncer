@@ -382,6 +382,14 @@ class Gate:
             self.log(f"#{n}: review requested for {head_sha[:12]}")
         elif state.get("status") == "pending" and action == "ready_for_review":
             self._draft(pr, True)
+        elif (state.get("status") == "pending" and action == "reopened" and head_repo
+              and self.now >= self._deadline(state)):
+            # Closed while waiting (by the contributor, say) and reopened after the deadline: a
+            # fresh deadline instead of closing it again on the spot. Same commit, so same round.
+            state["requested_at"] = self.now.strftime(ISO)
+            self._save_state(n, sticky, self._instructions(n, head_repo, state, STALE_NOTES.get(state.get("stale"), "")), state)
+            self._set_labels(n, labels, L_PENDING)
+            self.log(f"#{n}: reopened after the deadline; new deadline")
 
         if state.get("status") != "pending":
             return state.get("status", "")

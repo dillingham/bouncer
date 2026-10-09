@@ -800,6 +800,19 @@ def test_maintainers_can_be_reviewed_when_exemption_off():
     assert gate(gh, cfg_text="gate: {exempt_maintainers: false}").process(make_pr(assoc="OWNER"), action="opened") == "pending"
 
 
+def test_pending_pr_reopened_after_its_deadline_gets_a_new_one():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    # The contributor closed it themselves while it was waiting, and reopens it three days later.
+    later = T0 + dt.timedelta(hours=72)
+    assert gate(gh, now=later).process(make_pr(), action="reopened", sender="drive-by") == "pending"
+    st = gh.state(7)
+    assert 7 not in gh.closed and st["requested_at"] == later.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert st["rounds"] == 1 and st["fails"] == 0
+    assert gate(gh, now=later + dt.timedelta(hours=47)).process(make_pr()) == "pending"
+    assert gate(gh, now=later + dt.timedelta(hours=49)).process(make_pr()) == "expired"
+
+
 def test_reopen_after_expiry_starts_new_round():
     gh = FakeGitHub()
     gate(gh).process(make_pr(), action="opened")
