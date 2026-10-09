@@ -69,6 +69,12 @@ def untrusted(text: str, **attrs: str) -> str:
     return f"<untrusted{attr}>\n{body}\n</untrusted>"
 
 
+def inert_json(data, **kw) -> str:
+    """JSON with <, > and & escaped as \\u003c, \\u003e and \\u0026, so no string in it can end the
+    tag or HTML comment it's embedded in. JSON parsers read it as the same data."""
+    return json.dumps(data, **kw).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 def glob_to_regex(pattern: str) -> re.Pattern:
     """Path glob with ** (any depth), * (one segment) and ? support."""
     out = []

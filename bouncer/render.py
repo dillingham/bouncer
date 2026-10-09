@@ -5,7 +5,7 @@ import datetime as dt
 import json
 import re
 
-from .common import quote_path
+from .common import inert_json, quote_path
 from .config import Config
 from .decide import Decision, kind, pct, rule_of
 
@@ -126,8 +126,7 @@ def review_markdown(p: dict, d: Decision, cfg: Config, server: str = "https://gi
 def state_block(state: dict) -> str:
     """The state as JSON in an HTML comment. <, > and & are escaped inside the JSON, so no value
     (a review reason, say) can end the comment early or forge another marker."""
-    data = json.dumps(state, separators=(",", ":")).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    return f"{STATE_MARKER}{data} -->"
+    return f"{STATE_MARKER}{inert_json(state, separators=(',', ':'))} -->"
 
 
 def parse_state(comments: list[dict]) -> tuple[dict | None, dict | None]:

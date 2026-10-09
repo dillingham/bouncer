@@ -1,9 +1,7 @@
 """Prompts for the review agent."""
 from __future__ import annotations
 
-import json
-
-from .common import untrusted
+from .common import inert_json, untrusted
 from .config import Config
 
 SYSTEM = """You are the bouncer for an open source repository. A contributor opened a pull request and is paying, with their own API key, for you to review it on the maintainers' behalf. Your job is to decide whether this pull request is worth a maintainer's time, judged strictly against the maintainers' rules.
@@ -41,7 +39,8 @@ def build_user_content(cfg: Config, upstream: str, pr: dict, facts: dict, diff: 
         "additions": facts["additions"],
         "deletions": facts["deletions"],
         "files": [f"{f['status']} {f['path']} (+{f['additions']}/-{f['deletions']})" for f in facts["changed_files"][:300]],
-        "linked_issues": facts["linked_issues"],
+        # Numbers and states only: the titles are their authors' words, in the untrusted part below.
+        "linked_issues": [{"number": i["number"], "state": i["state"]} for i in facts["linked_issues"]],
     }
     trusted = f"""Repository: {upstream}
 
@@ -58,7 +57,7 @@ def build_user_content(cfg: Config, upstream: str, pr: dict, facts: dict, diff: 
 </contributing_guide>
 
 <facts computed_by="bouncer">
-{json.dumps(trusted_facts, indent=1)}
+{inert_json(trusted_facts, indent=1)}
 </facts>"""
 
     pr_text = f"Title: {pr.get('title') or ''}\n\nDescription:\n{(pr.get('body') or '(empty)')[:20000]}"
