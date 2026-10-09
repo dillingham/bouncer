@@ -2,6 +2,8 @@
 import copy
 import datetime as dt
 import json
+import os
+import subprocess
 from types import SimpleNamespace as NS
 
 import pytest
@@ -9,7 +11,7 @@ import pytest
 from bouncer import config
 from bouncer.agent import Agent, ReviewFailed, Workspace
 from bouncer.common import REVIEW_PROTOCOL, GitHubError
-from bouncer.gate import Found, Gate
+from bouncer.gate import Found, Gate, VerifyError, gh_verifier
 from bouncer.render import parse_state
 
 
@@ -395,13 +397,17 @@ def test_review_signed_from_imposter_commit_does_not_count():
     assert gate(gh, verifier=lambda r, s: [imposter, found("fail", ts=2)]).process(make_pr()) == "fail"
 
 
-@pytest.mark.parametrize("status,counts", [("ahead", True), ("identical", True), ("behind", False), ("diverged", False),
-                                           (GitHubError(404, "Not Found"), False), (GitHubError(502, "Bad"), False)])
-def test_signer_commit_must_be_in_gate_history(status, counts):
+@pytest.mark.parametrize("status,outcome", [("ahead", "pass"), ("identical", "pass"), ("behind", "pending"),
+                                            ("diverged", "pending"), (GitHubError(404, "Not Found"), "pending"),
+                                            (GitHubError(502, "Bad Gateway"), "verify-error")])
+def test_signer_commit_must_be_in_gate_history(status, outcome):
     gh = FakeGitHub()
     gh.compare[SIGNER] = status
     gate(gh).process(make_pr(), action="opened")
-    assert gate(gh, verifier=lambda r, s: [found("pass")]).process(make_pr()) == ("pass" if counts else "pending")
+    # past the deadline: a review that doesn't count lets it expire, an API error doesn't
+    late = T0 + dt.timedelta(hours=49)
+    assert gate(gh, verifier=lambda r, s: [found("pass")], now=late).process(make_pr()) == \
+        {"pending": "expired"}.get(outcome, outcome)
 
 
 def test_signer_uri_must_be_the_bouncer_review_workflow():
@@ -457,6 +463,78 @@ def test_deadline_expires():
     gate(gh).process(make_pr(), action="opened")
     assert gate(gh, now=T0 + dt.timedelta(hours=49)).process(make_pr()) == "expired"
     assert 7 in gh.closed
+
+
+@pytest.fixture
+def fake_gh_bin(tmp_path, monkeypatch):
+    """Put a fake `gh` on PATH that runs the given bash script."""
+    d = tmp_path / "bin"
+    d.mkdir()
+
+    def make(script):
+        f = d / "gh"
+        f.write_text("#!/usr/bin/env bash\n" + script)
+        f.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{d}:{os.environ['PATH']}")
+    return make
+
+
+def real_verifier(r, s):
+    return gh_verifier(r, s, "github.com/gh-bouncer/action/.github/workflows/review.yml", None)
+
+
+@pytest.mark.parametrize("script", [
+    'echo "X Loading attestations from GitHub API failed" >&2; echo "Error: HTTP 503: Service Unavailable" >&2; exit 1',
+    'echo "error creating Sigstore verifier: failed to create TUF client" >&2; exit 1',
+    'echo "A new release of gh is available"; exit 0',  # not JSON
+    'sleep 5',  # timeout (shortened below)
+])
+def test_verify_errors_are_not_missing_reviews(fake_gh_bin, monkeypatch, script):
+    from bouncer import gate as gate_mod
+
+    real_run = subprocess.run
+    monkeypatch.setattr(gate_mod.subprocess, "run", lambda *a, **kw: real_run(*a, **{**kw, "timeout": 1}))
+    fake_gh_bin(script + "\n")
+    with pytest.raises(VerifyError):
+        real_verifier("fork/repo", "subject")
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    logs = []
+    late = T0 + dt.timedelta(hours=48, minutes=1)
+    assert gate(gh, verifier=real_verifier, now=late, log=logs.append).process(make_pr()) == "verify-error"
+    assert 7 not in gh.closed and gh.state(7)["status"] == "pending"
+    assert any("couldn't check for a signed review" in line for line in logs)
+
+
+@pytest.mark.parametrize("stderr", ["X No attestations found for subject sha256:abc",
+                                    "no attestations found with predicate type: https://x",
+                                    "X Sigstore verification failed"])
+def test_no_review_is_not_a_verify_error(fake_gh_bin, stderr):
+    fake_gh_bin(f'echo "{stderr}" >&2; exit 1\n')
+    assert real_verifier("fork/repo", "subject") == []
+
+
+class SweepGH(FakeGitHub):
+    def paginate(self, path, limit=1000):
+        if "/issues?state=open" in path:
+            return [{"number": n, "pull_request": {}} for n in self.prs]
+        return super().paginate(path, limit)
+
+
+def test_one_failing_pr_does_not_stop_the_sweep():
+    gh = SweepGH()
+    gate(gh).process(make_pr(n=1), action="opened")
+    gate(gh).process(make_pr(n=2), action="opened")
+
+    def verifier(head_repo, name):
+        if "#1@" in name:
+            raise subprocess.TimeoutExpired(["gh"], 180)
+        return []
+
+    logs = []
+    gate(gh, verifier=verifier, now=T0 + dt.timedelta(hours=49), log=logs.append).sweep()
+    assert gh.state(2)["status"] == "expired" and gh.state(1)["status"] == "pending"
+    assert any(line.startswith("::warning::#1: TimeoutExpired") for line in logs)
 
 
 def test_exempt_authors_untouched():

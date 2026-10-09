@@ -83,6 +83,15 @@ def parse_verify_output(data: list) -> list[Found]:
     return found
 
 
+class VerifyError(RuntimeError):
+    """Couldn't tell whether a signed review exists: API, network, TUF or timeout trouble."""
+
+
+# What `gh attestation verify` says when there is simply no valid review: none at all, none of
+# the bouncer's type, or only ones that fail verification (e.g. signed by another workflow).
+NO_REVIEW = ("no attestations found", "sigstore verification failed", "policy verification failed")
+
+
 def gh_verifier(head_repo: str, name: str, signer_workflow: str, signer_digest: str | None) -> list[Found]:
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "subject")
@@ -99,12 +108,21 @@ def gh_verifier(head_repo: str, name: str, signer_workflow: str, signer_digest: 
         ]
         if signer_digest:
             cmd += ["--signer-digest", signer_digest]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            raise VerifyError("gh attestation verify timed out after 180 s") from None
     if res.returncode != 0:
-        tail = (res.stderr or "").strip().splitlines()[-3:]
-        print(f"  no verified review for {name}: {' | '.join(tail)}")
-        return []
-    return parse_verify_output(json.loads(res.stdout or "[]"))
+        tail = " | ".join((res.stderr or "").strip().splitlines()[-3:])
+        if any(s in (res.stderr or "").lower() for s in NO_REVIEW):
+            print(f"  no verified review for {name}: {tail}")
+            return []
+        raise VerifyError(tail or f"gh attestation verify exited with {res.returncode}")
+    try:
+        data = json.loads(res.stdout or "[]")
+    except ValueError:
+        raise VerifyError(f"gh attestation verify printed something other than JSON: {res.stdout.strip()[:200]}") from None
+    return parse_verify_output(data)
 
 
 class Gate:
@@ -258,7 +276,7 @@ class Gate:
         only exists in a fork of gh-bouncer/action (forks share git objects), and the signature
         then names gh-bouncer/action's review.yml all the same, with the fork's code inside. Such
         an imposter commit is never an ancestor of (or equal to) the ref the gate runs at.
-        Checked once per commit per run; a failed check means the review doesn't count.
+        Checked once per commit per run. If GitHub can't answer, that's a VerifyError.
         """
         sha = f.signer_sha
         expected = f"{self.server}/{self.action_repo}/.github/workflows/review.yml@".lower()
@@ -271,7 +289,9 @@ class Gate:
                 res = self.gh.get(f"/repos/{self.action_repo}/compare/{sha}...{urllib.parse.quote(ref, safe='/')}?per_page=1")
                 status = (res or {}).get("status", "")
             except GitHubError as e:
-                status = f"error ({e})"
+                if e.status not in (404, 422):  # the commit isn't in the repository at all
+                    raise VerifyError(f"couldn't compare {self.action_repo}@{sha[:12]} with {ref}: {e}") from None
+                status = f"not found ({e.status})"
             # "ahead": the gate's ref is ahead of the signer commit, so the commit is in its history.
             self._signer_ok[sha] = status in ("ahead", "identical")
             if not self._signer_ok[sha]:
@@ -369,15 +389,14 @@ class Gate:
         if state.get("status") != "pending":
             return state.get("status", "")
 
-        name = subject_name(self.repo, n, head_sha)
-        found = [
-            f for f in self.verifier(head_repo, name)
-            if str(f.predicate.get("upstream", "")).lower() == self.repo.lower()
-            and int(f.predicate.get("pr", -1)) == n
-            and f.predicate.get("head_sha") == head_sha
-            and str(f.predicate.get("head_repo", "")).lower() == head_repo.lower()
-        ]
-        found = [f for f in found if self._signed_by_gate_history(f)]
+        try:
+            found = self._signed_reviews(n, head_repo, head_sha)
+        except VerifyError as e:
+            # Not the same as no review: one may well exist. Try again next run, and don't let the
+            # deadline close the pull request on an outage.
+            self.log(f"::warning::#{n}: couldn't check for a signed review, trying again next run "
+                     f"(not closing it at the deadline meanwhile): {e}")
+            return "verify-error"
         valid = [f for f in found if not self._stale(f.predicate)]
         # Signed reviews of this commit that don't count. That's not a fail and uses no round:
         # the contributor is asked to run it again (said once per reason).
@@ -409,6 +428,18 @@ class Gate:
             self.log(f"#{n}: expired")
             return "expired"
         return "pending"
+
+    def _signed_reviews(self, n: int, head_repo: str, head_sha: str) -> list[Found]:
+        """Verified reviews of exactly this PR and commit, signed by the bouncer's review.yml from
+        the gate's own history, earliest first. Raises VerifyError if that can't be determined."""
+        found = [
+            f for f in self.verifier(head_repo, subject_name(self.repo, n, head_sha))
+            if str(f.predicate.get("upstream", "")).lower() == self.repo.lower()
+            and int(f.predicate.get("pr", -1)) == n
+            and f.predicate.get("head_sha") == head_sha
+            and str(f.predicate.get("head_repo", "")).lower() == head_repo.lower()
+        ]
+        return [f for f in found if self._signed_by_gate_history(f)]
 
     def _wrong_base(self, pr: dict, labels: set[str], sticky: dict | None, state: dict | None,
                     base: str, allowed: list[str]) -> str:
@@ -467,11 +498,10 @@ class Gate:
         for it in issues:
             if "pull_request" not in it:
                 continue
-            pr = self.gh.get(f"/repos/{self.repo}/pulls/{it['number']}")
             try:
-                self.process(pr)
-            except GitHubError as e:
-                self.log(f"#{it['number']}: {e}")
+                self.process(self.gh.get(f"/repos/{self.repo}/pulls/{it['number']}"))
+            except Exception as e:  # noqa: BLE001 - one pull request mustn't stop the sweep for the rest
+                self.log(f"::warning::#{it['number']}: {type(e).__name__}: {e}")
 
     def handle(self, event_name: str, payload: dict) -> None:
         if event_name in ("pull_request_target", "pull_request"):

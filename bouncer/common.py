@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import http.client
 import json
 import os
 import re
@@ -122,6 +123,13 @@ class GitHub:
                 raise GitHubError(e.code, msg) from None
             except urllib.error.URLError:
                 if attempt < 3:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+            except (TimeoutError, ConnectionResetError, http.client.RemoteDisconnected):
+                # The request may have gone through before the connection dropped. Everything the
+                # gate sends is safe to repeat except creating a comment, which would post twice.
+                if attempt < 3 and not (method == "POST" and path.endswith("/comments")):
                     time.sleep(2 ** attempt)
                     continue
                 raise

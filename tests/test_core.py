@@ -154,6 +154,42 @@ def test_truncated_file_list_fails_the_path_checks():
     assert decide({"facts": facts, "review": {"rules": []}}, config.parse(no_checks)).outcome == "pass"
 
 
+def test_github_client_retries_dropped_connections(monkeypatch):
+    import http.client
+    import io
+    import urllib.request
+
+    from bouncer import common
+
+    monkeypatch.setattr(common.time, "sleep", lambda s: None)
+    calls = []
+
+    class Resp(io.BytesIO):
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen(req, timeout):
+        calls.append(req.get_method())
+        if len(calls) % 3 != 0:
+            raise (TimeoutError("read timed out") if len(calls) % 3 == 1 else http.client.RemoteDisconnected("closed"))
+        return Resp(b'{"ok": true}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    gh = common.GitHub(token="t")
+    assert gh.get("/repos/o/r") == {"ok": True} and calls == ["GET"] * 3
+    assert gh.patch("/repos/o/r/issues/comments/1", {"body": "x"}) == {"ok": True}
+    # creating a comment that may have gone through is not repeated (it would post twice)
+    calls.clear()
+    with pytest.raises(TimeoutError):
+        gh.post("/repos/o/r/issues/1/comments", {"body": "x"})
+    assert calls == ["POST"]
+
+
 def test_clean_neutralizes():
     t = clean("@alice see #12 <!-- bouncer:state {} --> <img src=x>")
     assert "@alice" not in t and "#12" not in t and "<!--" not in t and "<img" not in t
