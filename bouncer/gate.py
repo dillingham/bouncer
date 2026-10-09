@@ -325,13 +325,22 @@ class Gate:
             self._close(n)
             return "reclosed"
 
+        # A maintainer set the bounce aside. That holds for later commits too, whatever
+        # rereview_after_pass says: a new round could only end in another bounce or, with no
+        # attempts left, in closing a pull request the maintainer chose to keep.
+        if state and state.get("status") == "override":
+            if state.get("sha") != head_sha:
+                state["sha"] = head_sha
+                self._save_state(n, sticky, "### 🚪 Bouncer\n\nReopened by a maintainer, so the bouncer verdict is set aside.", state)
+            return "override"
+
         # A PR that expired without a review gets a fresh round when it is reopened, even at the same commit.
         retry_expired = bool(state) and action == "reopened" and state.get("status") == "expired"
         # So does one that was bounced for its base branch, once it targets an allowed one.
         retarget = bool(state) and state.get("status") == "wrong_base"
         if state is None or state.get("sha") != head_sha or retry_expired or retarget:
             prev = state or {}
-            if prev.get("status") in ("pass", "override") and not self.cfg.rereview_after_pass:
+            if prev.get("status") == "pass" and not self.cfg.rereview_after_pass:
                 prev["sha"] = head_sha
                 self._save_state(n, sticky, "### 🚪 Bouncer\n\nAlready passed; later commits are not re-reviewed.", prev)
                 return "kept-pass"

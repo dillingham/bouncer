@@ -229,7 +229,10 @@ class TestGate(Gate):
 
     def process(self, pr, action=None, sender=None):
         if isinstance(self.gh, FakeGitHub):
-            self.gh.see(pr)  # what the test hands the gate is the pull request's current head
+            # What the test hands the gate is the pull request's current head; like every real
+            # path, the gate then sees it as freshly read (with the labels it left on it).
+            self.gh.see(pr)
+            pr = self.gh.pr(pr["number"])
         return super().process(pr, action=action, sender=sender)
 
 
@@ -400,9 +403,9 @@ def test_deadline_expires():
 
 def test_exempt_authors_untouched():
     gh = FakeGitHub()
-    assert gate(gh).process(make_pr(assoc="MEMBER")) == "exempt"
-    assert gate(gh).process(make_pr(author="dependabot[bot]")) == "exempt"
-    assert gate(gh).process(make_pr(labels=["bouncer:skip"])) == "exempt"
+    assert gate(gh).process(make_pr(n=1, assoc="MEMBER")) == "exempt"
+    assert gate(gh).process(make_pr(n=2, author="dependabot[bot]")) == "exempt"
+    assert gate(gh).process(make_pr(n=3, labels=["bouncer:skip"])) == "exempt"
     assert gh.comments == {}
 
 
@@ -414,6 +417,21 @@ def test_reopen_same_commit():
     assert gate(gh).process(make_pr(), action="reopened", sender="drive-by") == "reclosed"
     assert 7 in gh.closed
     assert gate(gh).process(make_pr(), action="reopened", sender="maint") == "override"
+
+
+@pytest.mark.parametrize("rereview", [True, False])
+def test_override_holds_for_later_commits(rereview):
+    gh = FakeGitHub(maintainers={"maint"})
+    cfg = f"gate: {{max_attempts: 1, rereview_after_pass: {str(rereview).lower()}}}"
+    gate(gh, cfg_text=cfg).process(make_pr(sha=A), action="opened")
+    gate(gh, verifier=lambda r, s: [found("fail", sha=A)], cfg_text=cfg).process(make_pr(sha=A))
+    assert 7 in gh.closed
+    # The maintainer reopens to set the verdict aside, asks for a tweak, and the contributor pushes it.
+    assert gate(gh, cfg_text=cfg).process(make_pr(sha=A), action="reopened", sender="maint") == "override"
+    assert gate(gh, cfg_text=cfg).process(make_pr(sha=B), action="synchronize") == "override"
+    st = gh.state(7)
+    assert st["status"] == "override" and st["sha"] == B and 7 not in gh.closed
+    assert not gh.labels[7] & {"bouncer:pending", "bouncer:fail"}
 
 
 def test_new_commit_after_fail_starts_new_round_until_exhausted():
