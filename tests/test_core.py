@@ -235,6 +235,45 @@ def test_github_client_retries_dropped_connections(monkeypatch):
     assert calls == ["POST"]
 
 
+@pytest.mark.parametrize("code", [502, 503, 504])
+def test_comment_is_not_posted_again_after_a_gateway_error(monkeypatch, code):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from bouncer import common
+
+    monkeypatch.setattr(common.time, "sleep", lambda s: None)
+    calls = []
+
+    class Resp(io.BytesIO):
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen(req, timeout):
+        calls.append((req.get_method(), req.full_url))
+        if len(calls) == 1:
+            # GitHub's front end gave up, but the comment may well have been created
+            raise urllib.error.HTTPError(req.full_url, code, "Bad Gateway", {}, io.BytesIO(b"{}"))
+        return Resp(b'{"id": 2}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    gh = common.GitHub(token="t")
+    with pytest.raises(common.GitHubError):
+        gh.post("/repos/o/r/issues/7/comments", {"body": "x"})
+    assert [c[0] for c in calls] == ["POST"]
+    # other requests are still retried
+    calls.clear()
+    assert gh.post("/repos/o/r/issues/7/labels", {"labels": ["x"]}) == {"id": 2} and len(calls) == 2
+    calls.clear()
+    assert gh.patch("/repos/o/r/issues/comments/1", {"body": "x"}) == {"id": 2} and len(calls) == 2
+
+
 def test_clean_neutralizes():
     t = clean("@alice see #12 <!-- bouncer:state {} --> <img src=x>")
     assert "@alice" not in t and "#12" not in t and "<!--" not in t and "<img" not in t

@@ -128,8 +128,13 @@ class GitHub:
             headers["Authorization"] = f"Bearer {self.token}"
         if data is not None:
             headers["Content-Type"] = "application/json"
-        for attempt in range(4):
+        # A request that fails with a 502/503/504 or a dropped connection may still have gone
+        # through. Everything the gate sends is safe to repeat except creating a comment, which
+        # would post it twice, so that is sent once.
+        tries = 1 if method == "POST" and path.endswith("/comments") else 4
+        for attempt in range(tries):
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
+            last = attempt == tries - 1
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     raw = resp.read()
@@ -139,19 +144,12 @@ class GitHub:
                     return (json.loads(raw) if raw else None), link
             except urllib.error.HTTPError as e:
                 msg = e.read().decode("utf-8", "replace")[:500]
-                if e.code in (502, 503, 504) and attempt < 3:
+                if e.code in (502, 503, 504) and not last:
                     time.sleep(2 ** attempt)
                     continue
                 raise GitHubError(e.code, msg) from None
-            except urllib.error.URLError:
-                if attempt < 3:
-                    time.sleep(2 ** attempt)
-                    continue
-                raise
-            except (TimeoutError, ConnectionResetError, http.client.RemoteDisconnected):
-                # The request may have gone through before the connection dropped. Everything the
-                # gate sends is safe to repeat except creating a comment, which would post twice.
-                if attempt < 3 and not (method == "POST" and path.endswith("/comments")):
+            except (urllib.error.URLError, TimeoutError, ConnectionResetError, http.client.RemoteDisconnected):
+                if not last:
                     time.sleep(2 ** attempt)
                     continue
                 raise
