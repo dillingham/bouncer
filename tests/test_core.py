@@ -11,10 +11,10 @@ import pytest
 from bouncer import config
 from bouncer.agent import Agent, Workspace, ToolError, normalize_review, verify_evidence
 from bouncer.common import PREDICATE_TYPE, path_matches, subject_digest, subject_name, untrusted
-from bouncer.decide import decide
+from bouncer.decide import brief, decide
 from bouncer.facts import linked_issue_numbers
 from bouncer.gate import parse_verify_output
-from bouncer.render import clean, parse_state, state_block
+from bouncer.render import clean, parse_state, review_markdown, state_block
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -265,13 +265,30 @@ def test_decide_missing_verdicts():
     cfg = config.parse("")
     # a hard rule the review skipped fails the PR
     d = decide(pred(drop=["in-scope"]), cfg)
-    assert d.outcome == "fail" and d.reasons == ["`in-scope`: the review didn't judge this rule."]
+    assert d.outcome == "fail" and d.reasons == ["`in-scope` (Required): the review didn't give a verdict on this rule."]
     # a skipped soft rule is only a note
     d = decide(pred(drop=["has-tests"]), cfg)
     assert d.outcome == "pass" and any("has-tests" in f for f in d.flags)
     # an explicit "unsure" on a hard rule still only flags (unchanged)
     d = decide(pred([rule("in-scope", "unsure", conf=0.3)]), cfg)
-    assert d.outcome == "pass" and any("unsure" in f for f in d.flags)
+    assert d.outcome == "pass" and any("Unsure" in f for f in d.flags)
+
+
+def test_decide_wording():
+    cfg = config.parse("")
+    d = decide(pred([rule("correct", "fail", conf=0.88), rule("in-scope", "fail", conf=0.6),
+                     rule("not-duplicate", "fail", verified=False), rule("matches-style", "fail"),
+                     rule("has-tests", "unsure", conf=0.5)], facts={"linked_issues": []}), cfg)
+    assert d.reasons == [
+        "Pre-check: no open issue is linked. Say which issue this fixes in the description, for example `Fixes #123`.",
+        "`correct` (Required, 88% confidence): r"]
+    assert d.flags == [
+        "`not-duplicate` (Required): r Didn't fail the pull request: no evidence the reviewer could verify.",
+        "`in-scope` (Required): r Didn't fail the pull request: 60% confidence, below the 80% fail confidence.",
+        "`matches-style` (Advisory): r",
+        "`has-tests` (Advisory): Unsure. r"]
+    assert [brief(x) for x in d.reasons] == [d.reasons[0].replace("`", ""), "correct: r"]
+    assert brief("`x` (Required, 90% confidence): " + "word " * 100).endswith("…")
 
 
 def test_decide_deterministic_checks():
@@ -279,6 +296,36 @@ def test_decide_deterministic_checks():
     d = decide(pred(facts={"linked_issues": [], "changed_files": [{"path": ".github/workflows/x.yml"}],
                            "changed_lines": 9, "author_prs_24h": 40}), cfg)
     assert d.outcome == "fail" and len(d.reasons) == 4
+
+
+def report_pred(outcome):
+    p = pred([rule("correct", "fail" if outcome == "fail" else "pass", conf=0.88), rule("in-scope", "fail", conf=0.6),
+              rule("has-tests", "unsure", conf=0.5)], drop=["matches-style"])
+    p.update(head_repo="f/r", head_sha="a" * 40, upstream="u/r", base_sha="b" * 40, model="claude-opus-5-5", effort="high",
+             usage={"input_tokens": 1200, "cache_read_input_tokens": 300, "output_tokens": 45},
+             run_url="https://github.com/f/r/actions/runs/1")
+    p["review"]["summary"] = "Fixes the thing.\nWith a test."
+    return p
+
+
+def test_report_layout():
+    cfg = config.parse("")
+    p = report_pred("fail")
+    body = review_markdown(p, decide(p, cfg), cfg, next_steps="**To try again** ...")
+    assert body.startswith("### ⛔ Bouncer review: Bounced\n\n> Fixes the thing.\n> With a test.\n")
+    why = body.split("**Why it was bounced**")[1].split("**To try again**")[0]
+    assert "- `correct` (Required, 88% confidence): r [`a:1`](https://github.com/f/r/blob/" + "a" * 40 + "/a#L1)" in why
+    # on a bounce the notes are collapsed, after the next steps
+    assert "<details><summary>Also noted: 3</summary>" in body and "**For the maintainer**" not in body
+    assert "<details><summary>Agent Rules: 1 failed · 2 noted · 1 unsure · 3 passed</summary>" in body
+    assert "- ⚠️ `matches-style` · Advisory: No verdict." in body
+    assert body.index("`correct` · Required") < body.index("`has-tests` · Advisory")  # Required first
+    assert body.endswith("<sub>Reviewed `aaaaaaa` with claude-opus-5-5 at high effort on the contributor's API key · "
+                         "1,500 input and 45 output tokens · [signed run](https://github.com/f/r/actions/runs/1)</sub>")
+    p = report_pred("pass")
+    body = review_markdown(p, decide(p, cfg), cfg)
+    assert body.startswith("### ✅ Bouncer review: Passed") and "**Why it was bounced**" not in body
+    assert "**For the maintainer** (these didn't fail the pull request)\n\n- `in-scope` (Required): r Didn't fail" in body
 
 
 # --- gh attestation output -----------------------------------------------------

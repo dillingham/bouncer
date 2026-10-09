@@ -5,7 +5,8 @@ import json
 import re
 
 from .common import quote_path
-from .decide import Decision
+from .config import Config
+from .decide import Decision, kind, pct, rule_of
 
 STATE_MARKER = "<!-- bouncer:state "
 BOT_LOGIN = "github-actions[bot]"
@@ -21,43 +22,67 @@ def clean(text: str, limit: int = 1500) -> str:
     return t.strip()
 
 
-def _cost_line(usage: dict) -> str:
-    return (
-        f"{usage.get('input_tokens', 0) + usage.get('cache_read_input_tokens', 0) + usage.get('cache_creation_input_tokens', 0):,} input "
-        f"and {usage.get('output_tokens', 0):,} output tokens over {usage.get('turns', 0)} turns"
-    )
+def _n(k: int, word: str) -> str:
+    return f"{k} {word}{'' if k == 1 else 's'}"
 
 
-def review_markdown(p: dict, d: Decision, server: str = "https://github.com") -> str:
-    icon = "✅" if d.outcome == "pass" else "⛔"
-    title = "Passed" if d.outcome == "pass" else "Bounced"
+def _evidence_links(r: dict, blob: str, base_blob: str) -> str:
+    """Links to the verified evidence of a rule verdict (unverified quotes aren't shown)."""
+    out = []
+    for e in r.get("evidence", []):
+        if e.get("verified"):
+            base = blob if e.get("root") == "head" else base_blob
+            path = clean(e.get("path", ""), 300).replace("`", "'")
+            out.append(f"[`{path}:{e.get('line')}`]({base}/{quote_path(e.get('path', ''))}#L{int(e.get('line') or 0)})")
+    return " ".join(out)
+
+
+def review_markdown(p: dict, d: Decision, cfg: Config, server: str = "https://github.com", next_steps: str = "") -> str:
+    """The review report: verdict, summary, why it bounced (with evidence), next steps for the
+    contributor, notes for the maintainer, and every Agent Rule, Required ones first."""
     review = p.get("review", {})
     blob = f"{server}/{p['head_repo']}/blob/{p['head_sha']}"
     base_blob = f"{server}/{p['upstream']}/blob/{p['base_sha']}"
-    out = [f"### {icon} Bouncer review: {title}", ""]
+    by_id = {r.get("id"): r for r in review.get("rules", [])}
+    passed = d.outcome == "pass"
+    out = [f"### {'✅' if passed else '⛔'} Bouncer review: {'Passed' if passed else 'Bounced'}", ""]
     if review.get("summary"):
-        out += [clean(review["summary"], 2000), ""]
+        out += ["\n".join(f"> {line}" for line in clean(review["summary"], 1000).splitlines()), ""]
     if d.reasons:
-        out += ["**Why it was bounced**", ""] + [f"- {clean(r)}" for r in d.reasons] + [""]
+        out += ["**Why it was bounced**", ""]
+        for reason in d.reasons:
+            links = _evidence_links(by_id.get(rule_of(reason)) or {}, blob, base_blob)
+            out.append(f"- {clean(reason)}" + (f" {links}" if links else ""))
+        out.append("")
+    if next_steps:
+        out += [next_steps, ""]
     if d.flags:
-        out += ["**Notes for the maintainer**", ""] + [f"- {clean(f)}" for f in d.flags] + [""]
+        # On a pass the maintainer is the reader; on a bounce, the contributor first.
+        notes = [f"- {clean(f)}" for f in d.flags]
+        if passed:
+            out += ["**For the maintainer** (these didn't fail the pull request)", ""] + notes + [""]
+        else:
+            out += [f"<details><summary>Also noted: {len(d.flags)}</summary>", ""] + notes + ["", "</details>", ""]
 
-    out += ["<details><summary>Rule by rule</summary>", ""]
-    for r in review.get("rules", []):
-        mark = {"pass": "✅", "fail": "❌", "unsure": "❔"}.get(r.get("result"), "❔")
-        out.append(f"- {mark} **{clean(r.get('id', ''), 60)}** ({r.get('confidence', 0):.2f}): {clean(r.get('reason', ''))}")
-        for e in r.get("evidence", []):
-            if not e.get("verified"):
-                continue
-            base = blob if e.get("root") == "head" else base_blob
-            path = clean(e.get("path", ""), 300).replace("`", "'")
-            out.append(f"  - [`{path}:{e.get('line')}`]({base}/{quote_path(e.get('path', ''))}#L{int(e.get('line') or 0)})")
-    out += ["", "</details>", ""]
-    usage = p.get("usage", {})
-    out.append(
-        f"<sub>Reviewed `{p['head_sha'][:12]}` with {clean(p.get('model', ''), 60)} on the contributor's API key "
-        f"({_cost_line(usage)}). [Signed run]({p.get('run_url', '')}).</sub>"
-    )
+    failed = {rule_of(x) for x in d.reasons}
+    counts = {"failed": 0, "noted": 0, "unsure": 0, "passed": 0}
+    rows = []
+    for rule in sorted(cfg.rules, key=lambda r: not r.hard):
+        r = by_id.get(rule.id) or {}
+        res = {"pass": "passed", "unsure": "unsure"}.get(r.get("result"), "failed" if rule.id in failed else "noted")
+        counts[res] += 1
+        mark = {"passed": "✅", "failed": "❌", "noted": "⚠️", "unsure": "❔"}[res]
+        detail = f" · {pct(float(r.get('confidence', 0) or 0))}: {clean(r.get('reason', ''))}" if r else ": No verdict."
+        links = _evidence_links(r, blob, base_blob)
+        rows.append(f"- {mark} `{rule.id}` · {kind(rule.hard)}{detail}" + (f" {links}" if links else ""))
+    summary = " · ".join(f"{v} {k}" for k, v in counts.items() if v)
+    out += [f"<details><summary>Agent Rules: {summary}</summary>", ""] + rows + ["", "</details>", ""]
+
+    u = p.get("usage", {})
+    tokens_in = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+    out.append(f"<sub>Reviewed `{p['head_sha'][:7]}` with {clean(p.get('model', ''), 60)} at "
+               f"{clean(p.get('effort') or 'high', 10)} effort on the contributor's API key · {tokens_in:,} input and "
+               f"{u.get('output_tokens', 0):,} output tokens · [signed run]({p.get('run_url', '')})</sub>")
     return "\n".join(out)
 
 

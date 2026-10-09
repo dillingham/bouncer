@@ -520,7 +520,7 @@ class Gate:
     def _apply(self, pr: dict, labels: set[str], sticky: dict | None, state: dict, f: Found, attempts: int) -> str:
         n = int(pr["number"])
         d = decide(f.predicate, self.cfg)
-        report = review_markdown(f.predicate, d, self.server)
+        report = review_markdown(f.predicate, d, self.cfg, self.server)
         if attempts > 1:
             report += f"\n\n<sub>{attempts} reviews were run for this commit; only the first one counts.</sub>"
         self._comment(n, report)

@@ -249,7 +249,7 @@ def cmd_report(args) -> None:
     cfg = config_mod.parse((out / CONFIG_COPY).read_text())
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     preview = decide(predicate, cfg)
-    report = review_markdown(predicate, preview, server)
+    report = review_markdown(predicate, preview, cfg, server)
     (out / "report.md").write_text(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
