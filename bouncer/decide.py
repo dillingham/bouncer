@@ -35,10 +35,14 @@ def check_facts(facts: dict, cfg: Config) -> list[str]:
             f"{cfg.max_changed_lines} per pull request."
         )
     if cfg.forbidden_paths:
-        touched = [f["path"] for f in facts.get("changed_files", []) if path_matches(f["path"], cfg.forbidden_paths)]
+        touched = [p for f in facts.get("changed_files", []) for p in (f.get("previous_path"), f["path"])
+                   if p and path_matches(p, cfg.forbidden_paths)]
         if touched:
             shown = ", ".join(f"`{p}`" for p in touched[:5])
             out.append(f"Touches paths outside contributors' reach: {shown}.")
+    if facts.get("files_truncated") and (cfg.forbidden_paths or cfg.max_changed_lines):
+        # GitHub lists at most 3,000 changed files, so the checks above can't see the rest.
+        out.append("Changes more files than GitHub lists (3,000), so the changed paths and lines can't all be checked.")
     prs = facts.get("author_prs_24h")
     if cfg.max_author_prs_24h and isinstance(prs, int) and prs > cfg.max_author_prs_24h:
         out.append(

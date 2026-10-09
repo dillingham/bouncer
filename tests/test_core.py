@@ -134,6 +134,26 @@ def test_cross_repo_closing_reference_is_not_an_upstream_issue():
     assert [i["number"] for i in facts["linked_issues"]] == [7]
 
 
+def test_rename_out_of_forbidden_path_is_caught():
+    files = [{"filename": "old-ci.yml.bak", "previous_filename": ".github/workflows/ci.yml",
+              "status": "renamed", "additions": 0, "deletions": 0}]
+    facts = gather(FactsGH(files=files), "Fixes #1")
+    assert facts["changed_files"][0]["previous_path"] == ".github/workflows/ci.yml"
+    d = decide({"facts": facts, "review": {"rules": []}}, config.parse("rules: [{id: a, hard: false, description: x}]"))
+    assert d.outcome == "fail" and any("`.github/workflows/ci.yml`" in r for r in d.reasons)
+
+
+def test_truncated_file_list_fails_the_path_checks():
+    files = [{"filename": f"f{i}", "status": "added", "additions": 1, "deletions": 0} for i in range(3000)]
+    facts = gather(FactsGH(files=files), "Fixes #1")
+    assert facts["files_truncated"] is True
+    soft = "rules: [{id: a, hard: false, description: x}]\n"
+    assert decide({"facts": facts, "review": {"rules": []}}, config.parse(soft)).outcome == "fail"
+    # nothing to check paths or lines against: the truncation doesn't matter
+    no_checks = soft + "checks: {forbidden_paths: [], max_changed_lines: 0}"
+    assert decide({"facts": facts, "review": {"rules": []}}, config.parse(no_checks)).outcome == "pass"
+
+
 def test_clean_neutralizes():
     t = clean("@alice see #12 <!-- bouncer:state {} --> <img src=x>")
     assert "@alice" not in t and "#12" not in t and "<!--" not in t and "<img" not in t

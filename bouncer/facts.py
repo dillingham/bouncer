@@ -58,6 +58,8 @@ def gather(gh: GitHub, upstream: str, pr_data: dict, now: dt.datetime | None = N
             "status": f.get("status", ""),
             "additions": int(f.get("additions", 0)),
             "deletions": int(f.get("deletions", 0)),
+            # A rename also changes the old path (moving a file out of a forbidden path removes it there).
+            **({"previous_path": f["previous_filename"]} if f.get("previous_filename") else {}),
         }
         for f in files
     ]
