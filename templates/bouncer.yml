@@ -1,5 +1,5 @@
 # Bouncer: https://github.com/gh-bouncer/gh-bouncer
-# In this repository, the gate holds outside pull requests until they pass a signed review.
+# In this repository, the bouncer holds outside pull requests until they pass a signed review.
 # In forks, the review runs on the contributor's own ANTHROPIC_API_KEY (via `gh bouncer`).
 name: Bouncer
 # Fork runs: "Bouncer review · PR #7" (gh bouncer finds its run by this), or "Bouncer review" on a push.

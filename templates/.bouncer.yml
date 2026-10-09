@@ -1,17 +1,18 @@
-# Bouncer settings. Read from your default branch; contributors can't change them.
+# Bouncer Repo Config. Read from your default branch; contributors can't change it.
 version: 1
 
 review:
   # The model and effort decide how thorough (and how expensive for the contributor) a review is.
+  # Changing anything in review, guidance or rules makes earlier reviews not count.
   model: claude-opus-5-5
   effort: high          # low | medium | high | xhigh | max
   # max_turns: 35       # tool-use turns; defaults by effort
 
 gate:
-  deadline_hours: 48            # close if no signed review arrives in time
-  max_attempts: 3               # bounced review rounds before a PR is closed for good
-  close_on_fail: true           # false = label bouncer:fail and leave open
-  fail_confidence: 0.8          # a hard rule fails the PR only at or above this confidence
+  deadline_hours: 48            # close a pull request if no signed review arrives in time
+  max_attempts: 3               # review attempts per pull request; each bounce or missed deadline uses one
+  close_on_fail: true           # false = bounced pull requests get bouncer:fail but stay open
+  fail_confidence: 0.8          # a Required rule bounces a pull request only at or above this confidence
   rereview_after_pass: true     # new commits after a pass need a new review
   exempt_prior_contributors: false  # true = one merged PR exempts everything its author opens afterwards
   exempt_maintainers: true      # false only for testing the bouncer on your own PRs
@@ -20,7 +21,7 @@ gate:
     - renovate[bot]
   # pin_review_to_gate_version: true   # only accept reviews from the exact same bouncer commit
 
-checks:                         # deterministic, no AI involved
+checks:                         # Pre-checks: checked in code before the agent runs, no AI involved
   target_branches: []           # base branches outside PRs may target; [] = the default branch only
   require_linked_issue: true
   max_changed_lines: 0          # 0 = no limit
@@ -28,10 +29,12 @@ checks:                         # deterministic, no AI involved
   forbidden_paths:              # like .gitignore: /x = from the repo root, x/ = a directory, *.lock = at any depth
     - ".github/**"
 
-# Free text for the reviewer: scope, roadmap, things you never accept.
+# Free text for the agent: scope, roadmap, things you never accept.
 guidance: |
   We do not accept new dependencies without prior discussion in an issue.
 
+# Agent Rules. hard: true = Required (can bounce a pull request); hard: false = Advisory (only
+# reported to you).
 rules:
   - id: solves-linked-issue
     hard: true
