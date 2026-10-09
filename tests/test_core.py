@@ -172,6 +172,9 @@ def test_parse_real_gh_output_and_ordering():
     found = parse_verify_output([ours(300, "late"), ours(100, "first"), ours(200, "mid")])
     assert [f.predicate["n"] for f in found] == ["first", "mid", "late"]
     assert found[0].run.startswith("https://github.com/")
+    # the signer commit and workflow ref come from the certificate
+    assert found[0].signer_sha == "09b495c3f12c7881b3cc17209a327792065c1a1d"
+    assert found[0].signer_uri.endswith("/.github/workflows/attest.yml@09b495c3f12c7881b3cc17209a327792065c1a1d")
 
 
 # --- workspace and evidence -----------------------------------------------------

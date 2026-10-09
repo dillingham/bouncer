@@ -27,6 +27,7 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
 | Attempt | What stops it |
 |---|---|
 | Edit the review workflow in their fork | The gate only accepts attestations signed by `gh-bouncer/action/.github/workflows/review.yml`, so a modified workflow signs with the wrong identity. |
+| Run `review.yml` from a commit that only exists in a fork of `gh-bouncer/action` (GitHub resolves those, and the signature still names `gh-bouncer/action`) | The signing commit must be in the history of the gate's own version (the ref in `uses: gh-bouncer/action@v1`), checked with the compare API. |
 | Run it on their own machine or a self-hosted runner | Verified with `--deny-self-hosted-runners`. |
 | Pick a cheap model, lower effort, or soften the rules | Model, effort and rules come from the upstream `.bouncer.yml`; the workflow has no inputs for them. |
 | Get reviewed under older or weaker settings | The review signs a digest of the settings it used, and the gate only accepts reviews made with its current settings. |

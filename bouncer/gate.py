@@ -10,6 +10,7 @@ import base64
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,9 @@ class Found:
     ts: int
     predicate: dict
     run: str
+    # From the signing certificate: the review.yml commit that ran, and its full workflow ref.
+    signer_sha: str = ""
+    signer_uri: str = ""
 
 
 def parse_verify_output(data: list) -> list[Found]:
@@ -66,7 +70,9 @@ def parse_verify_output(data: list) -> list[Found]:
                 stamps = item["verificationResult"].get("verifiedTimestamps") or []
                 ts = min(int(_parse_time(s["timestamp"]).timestamp()) for s in stamps)
             cert = item["verificationResult"]["signature"]["certificate"]
-            found.append(Found(ts=ts, predicate=stmt["predicate"], run=cert.get("runInvocationURI", "")))
+            found.append(Found(ts=ts, predicate=stmt["predicate"], run=cert.get("runInvocationURI", ""),
+                               signer_sha=str(cert.get("buildSignerDigest") or "").lower(),
+                               signer_uri=str(cert.get("buildSignerURI") or "")))
         except (KeyError, TypeError, ValueError):
             continue
     found.sort(key=lambda f: f.ts)
@@ -99,7 +105,8 @@ def gh_verifier(head_repo: str, name: str, signer_workflow: str, signer_digest: 
 
 class Gate:
     def __init__(self, gh: GitHub, repo: str, cfg: config_mod.Config, verifier: Callable[[str, str], list[Found]],
-                 now: dt.datetime | None = None, server: str = "https://github.com", log=print):
+                 now: dt.datetime | None = None, server: str = "https://github.com", log=print,
+                 action_repo: str = "gh-bouncer/action", action_ref: str = ""):
         self.gh = gh
         self.repo = repo
         self.cfg = cfg
@@ -107,6 +114,10 @@ class Gate:
         self.now = now or dt.datetime.now(dt.timezone.utc)
         self.server = server
         self.log = log
+        # The bouncer action this gate runs as, and its ref ("" = unknown, e.g. a local path).
+        self.action_repo = action_repo
+        self.action_ref = action_ref
+        self._signer_ok: dict[str, bool] = {}  # signer commit -> in the gate's history (per run)
         self._labels_ready = False
 
     # --- GitHub helpers ---------------------------------------------------
@@ -211,6 +222,40 @@ class Gate:
             return "config"  # made with other settings than the maintainers' current ones
         return None
 
+    def _gate_ref(self) -> str:
+        if not self.action_ref:
+            # Not run from a tagged download (e.g. a local path): the action's default branch.
+            self.action_ref = self.gh.get(f"/repos/{self.action_repo}")["default_branch"]
+        return self.action_ref
+
+    def _signed_by_gate_history(self, f: Found) -> bool:
+        """Whether the review was signed by a review.yml commit in the history of the gate's own ref.
+
+        GitHub runs `uses: gh-bouncer/action/.github/workflows/review.yml@<sha>` even when <sha>
+        only exists in a fork of gh-bouncer/action (forks share git objects), and the signature
+        then names gh-bouncer/action's review.yml all the same, with the fork's code inside. Such
+        an imposter commit is never an ancestor of (or equal to) the ref the gate runs at.
+        Checked once per commit per run; a failed check means the review doesn't count.
+        """
+        sha = f.signer_sha
+        expected = f"{self.server}/{self.action_repo}/.github/workflows/review.yml@".lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", sha) or not f.signer_uri.lower().startswith(expected):
+            self.log(f"  ignoring a review with an unexpected signer: {f.signer_uri or '(none)'}")
+            return False
+        if sha not in self._signer_ok:
+            ref = self._gate_ref()
+            try:
+                res = self.gh.get(f"/repos/{self.action_repo}/compare/{sha}...{urllib.parse.quote(ref, safe='/')}?per_page=1")
+                status = (res or {}).get("status", "")
+            except GitHubError as e:
+                status = f"error ({e})"
+            # "ahead": the gate's ref is ahead of the signer commit, so the commit is in its history.
+            self._signer_ok[sha] = status in ("ahead", "identical")
+            if not self._signer_ok[sha]:
+                self.log(f"  ignoring reviews signed by {self.action_repo}@{sha[:12]}: not in the history of "
+                         f"{self.action_repo}@{ref} (compare: {status})")
+        return self._signer_ok[sha]
+
     def _instructions(self, n: int, head_repo: str, state: dict, note: str = "") -> str:
         return instructions(n, head_repo, self.repo, _fmt_deadline(self._deadline(state)),
                             self.cfg.max_attempts - int(state.get("fails", 0)), self.server, note)
@@ -299,6 +344,7 @@ class Gate:
             and f.predicate.get("head_sha") == head_sha
             and str(f.predicate.get("head_repo", "")).lower() == head_repo.lower()
         ]
+        found = [f for f in found if self._signed_by_gate_history(f)]
         valid = [f for f in found if not self._stale(f.predicate)]
         if valid:
             return self._apply(pr, labels, sticky, state, valid[0], attempts=len(valid))
@@ -447,7 +493,8 @@ def main() -> None:
 
     with open(os.environ["GITHUB_EVENT_PATH"]) as f:
         payload = json.load(f)
-    Gate(gh, repo, cfg, verifier, server=server).handle(os.environ["GITHUB_EVENT_NAME"], payload)
+    Gate(gh, repo, cfg, verifier, server=server, action_repo=bouncer_repo, action_ref=bouncer_ref).handle(
+        os.environ["GITHUB_EVENT_NAME"], payload)
 
 
 if __name__ == "__main__":

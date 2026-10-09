@@ -88,6 +88,10 @@ def test_agent_gives_up(tmp_path):
 
 
 # --- gate --------------------------------------------------------------------
+SIGNER = "5" * 40  # a review.yml commit in the history of the gate's ref
+IMPOSTER = "6" * 40  # one that only exists in a fork of gh-bouncer/action
+
+
 class FakeGitHub:
     def __init__(self, maintainers=()):
         self.comments = {}
@@ -96,6 +100,9 @@ class FakeGitHub:
         self.graphql_calls = []
         self.maintainers = set(maintainers)
         self.next_id = 1
+        # compare API of the action repo: signer commit -> status against the gate's ref
+        self.compare = {SIGNER: "ahead"}
+        self.compare_calls = []
 
     def _num(self, path, idx):
         return int(path.split("/")[idx])
@@ -112,6 +119,14 @@ class FakeGitHub:
         return None
 
     def get(self, path, accept=None):
+        if path.startswith("/repos/gh-bouncer/action/compare/"):
+            self.compare_calls.append(path)
+            status = self.compare.get(path.split("/compare/")[1].split("...")[0], "diverged")
+            if isinstance(status, Exception):
+                raise status
+            return {"status": status}
+        if path == "/repos/gh-bouncer/action":
+            return {"default_branch": "main"}
         raise AssertionError(path)
 
     def post(self, path, body):
@@ -165,11 +180,12 @@ def make_pr(n=7, sha="a" * 40, assoc="NONE", labels=(), draft=False, author="dri
             "base": {"ref": base, "repo": {"full_name": "up/repo", "default_branch": "main"}}}
 
 
-def found(outcome, sha="a" * 40, n=7, ts=1, digest=None, protocol=REVIEW_PROTOCOL):
+def found(outcome, sha="a" * 40, n=7, ts=1, digest=None, protocol=REVIEW_PROTOCOL, signer=SIGNER):
     rules = [{"id": r.id, "result": "fail" if outcome == "fail" and r.id == "correct" else "pass", "confidence": 0.95,
               "reason": "breaks x", "evidence": [{"root": "head", "path": "a.py", "line": 1, "quote": "x", "verified": True}]}
              for r in config.parse("").rules]
-    return Found(ts=ts, run="https://github.com/fork/repo/actions/runs/1", predicate={
+    return Found(ts=ts, run="https://github.com/fork/repo/actions/runs/1", signer_sha=signer,
+                 signer_uri="https://github.com/gh-bouncer/action/.github/workflows/review.yml@refs/tags/v1", predicate={
         "upstream": "Up/Repo", "pr": n, "head_sha": sha, "head_repo": "fork/repo", "base_sha": "b" * 40,
         "protocol": protocol, "config_digest": digest or config.parse("").digest,
         "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": 1, "turns": 1},
@@ -177,8 +193,8 @@ def found(outcome, sha="a" * 40, n=7, ts=1, digest=None, protocol=REVIEW_PROTOCO
         "review": {"summary": "s", "rules": rules, "injection_detected": False, "injection_notes": ""}})
 
 
-def gate(gh, verifier=lambda r, s: [], now=T0, cfg_text=""):
-    return Gate(gh, "up/repo", config.parse(cfg_text), verifier, now=now, log=lambda *_: None)
+def gate(gh, verifier=lambda r, s: [], now=T0, cfg_text="", action_ref="v1", log=lambda *_: None):
+    return Gate(gh, "up/repo", config.parse(cfg_text), verifier, now=now, log=log, action_ref=action_ref)
 
 
 def test_new_pr_gets_instructions_then_passes():
@@ -210,6 +226,47 @@ def test_only_matching_attestations_count():
     gate(gh).process(make_pr(), action="opened")
     wrong = [found("pass", sha="c" * 40), found("pass", n=8)]
     assert gate(gh, verifier=lambda r, s: wrong).process(make_pr()) == "pending"
+
+
+def test_review_signed_from_imposter_commit_does_not_count():
+    # review.yml@<sha of a commit that only exists in a fork of gh-bouncer/action>: the signature
+    # names gh-bouncer/action's review.yml, but the commit isn't in the history of the gate's ref.
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    logs = []
+    imposter = found("pass", signer=IMPOSTER)
+    g = gate(gh, verifier=lambda r, s: [imposter, found("fail", signer=IMPOSTER, ts=2)], log=logs.append)
+    assert g.process(make_pr()) == "pending"
+    st = gh.state(7)
+    assert st["status"] == "pending" and st["fails"] == 0 and 7 not in gh.closed  # no valid review, not a fail
+    assert any("not in the history of gh-bouncer/action@v1" in line for line in logs)
+    assert gh.compare_calls == [f"/repos/gh-bouncer/action/compare/{IMPOSTER}...v1?per_page=1"]  # cached per commit
+    # a real review after it counts, even though the imposter one came first
+    assert gate(gh, verifier=lambda r, s: [imposter, found("fail", ts=2)]).process(make_pr()) == "fail"
+
+
+@pytest.mark.parametrize("status,counts", [("ahead", True), ("identical", True), ("behind", False), ("diverged", False),
+                                           (GitHubError(404, "Not Found"), False), (GitHubError(502, "Bad"), False)])
+def test_signer_commit_must_be_in_gate_history(status, counts):
+    gh = FakeGitHub()
+    gh.compare[SIGNER] = status
+    gate(gh).process(make_pr(), action="opened")
+    assert gate(gh, verifier=lambda r, s: [found("pass")]).process(make_pr()) == ("pass" if counts else "pending")
+
+
+def test_signer_uri_must_be_the_bouncer_review_workflow():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    other = found("pass")
+    other.signer_uri = "https://github.com/fork/repo/.github/workflows/review.yml@refs/heads/main"
+    assert gate(gh, verifier=lambda r, s: [other]).process(make_pr()) == "pending" and gh.compare_calls == []
+
+
+def test_gate_without_a_ref_compares_against_the_default_branch():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    assert gate(gh, verifier=lambda r, s: [found("pass")], action_ref="").process(make_pr()) == "pass"
+    assert gh.compare_calls == [f"/repos/gh-bouncer/action/compare/{SIGNER}...main?per_page=1"]
 
 
 def test_review_with_other_settings_does_not_count():
