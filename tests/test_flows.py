@@ -300,6 +300,13 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
     assert "Bounced" in (out / "report.md").read_text() and "Bounced" in summary.read_text()
 
 
+def test_prior_contributors_reviewed_unless_exempted():
+    assert config.parse("").exempt_prior_contributors is False
+    assert gate(FakeGitHub()).process(make_pr(assoc="CONTRIBUTOR"), action="opened") == "pending"
+    cfg = "gate: {exempt_prior_contributors: true}"
+    assert gate(FakeGitHub(), cfg_text=cfg).process(make_pr(assoc="CONTRIBUTOR"), action="opened") == "exempt"
+
+
 def test_maintainers_can_be_reviewed_when_exemption_off():
     gh = FakeGitHub()
     assert gate(gh, cfg_text="gate: {exempt_maintainers: false}").process(make_pr(assoc="OWNER"), action="opened") == "pending"

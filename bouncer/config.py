@@ -83,7 +83,8 @@ class Config:
     fail_confidence: float = 0.8
     pin_review_to_gate_version: bool = False
     exempt_users: list[str] = field(default_factory=lambda: ["dependabot[bot]", "renovate[bot]"])
-    exempt_prior_contributors: bool = True
+    # Off by default: one merged PR would exempt everything its author opens afterwards.
+    exempt_prior_contributors: bool = False
     exempt_maintainers: bool = True
     rereview_after_pass: bool = True
     require_linked_issue: bool = True

@@ -44,7 +44,7 @@ Run `gh bouncer init` in the project (or `gh bouncer init -R owner/repo`). It op
 - `.github/workflows/bouncer.yml`: one workflow with two jobs. In your repo the **gate** job runs `uses: gh-bouncer/action@v1`. In forks, which inherit the file, the **review** job runs the signed review on the contributor's key.
 - `.bouncer.yml`: model, effort, deadlines and rules. Edit the rules and `guidance` to match the project before merging; `guidance` (scope, things you never accept) is the strongest lever on verdict quality.
 
-Members, collaborators, prior contributors (configurable), listed bots, and any PR labeled `bouncer:skip` are exempt. Reopening a bounced PR yourself overrides the verdict.
+Members, collaborators, listed bots, and any PR labeled `bouncer:skip` are exempt. Prior contributors are not by default (`exempt_prior_contributors`), since one merged PR would exempt everything its author opens afterwards. Reopening a bounced PR yourself overrides the verdict.
 
 Prefer to do it by hand? Copy `templates/bouncer.yml` to `.github/workflows/bouncer.yml` and `templates/.bouncer.yml` to the repo root.
 
