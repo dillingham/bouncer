@@ -1,4 +1,5 @@
 """Agent loop with a fake Anthropic client, and gate flows with a fake GitHub."""
+import base64
 import copy
 import datetime as dt
 import json
@@ -11,7 +12,7 @@ import pytest
 
 from bouncer import config
 from bouncer.agent import Agent, ReviewFailed, Workspace
-from bouncer.common import REVIEW_PROTOCOL, GitHubError
+from bouncer.common import PREDICATE_TYPE, REVIEW_PROTOCOL, GitHubError
 from bouncer.gate import Found, Gate, VerifyError, gh_verifier
 from bouncer.render import parse_state, state_block
 
@@ -152,6 +153,7 @@ def test_agent_gives_up(tmp_path):
 # --- gate --------------------------------------------------------------------
 SIGNER = "5" * 40  # a review.yml commit in the history of the gate's ref
 IMPOSTER = "6" * 40  # one that only exists in a fork of gh-bouncer/action
+FORK_ID = 1001  # the fork's repository id: in the pull request, and in the signing certificate
 
 
 class FakeGitHub:
@@ -291,15 +293,15 @@ T0 = dt.datetime(2026, 10, 9, 12, 0, tzinfo=dt.timezone.utc)
 def make_pr(n=7, sha="a" * 40, assoc="NONE", labels=(), draft=False, author="drive-by", base="main"):
     return {"number": n, "state": "open", "node_id": f"PR_{n}", "draft": draft, "author_association": assoc,
             "user": {"login": author}, "labels": [{"name": x} for x in labels],
-            "head": {"sha": sha, "repo": {"full_name": "fork/repo"}},
+            "head": {"sha": sha, "repo": {"full_name": "fork/repo", "id": FORK_ID}},
             "base": {"ref": base, "repo": {"full_name": "up/repo", "default_branch": "main"}}}
 
 
-def found(outcome, sha="a" * 40, n=7, ts=1, digest=None, protocol=REVIEW_PROTOCOL, signer=SIGNER):
+def found(outcome, sha="a" * 40, n=7, ts=1, digest=None, protocol=REVIEW_PROTOCOL, signer=SIGNER, repo_id=FORK_ID):
     rules = [{"id": r.id, "result": "fail" if outcome == "fail" and r.id == "correct" else "pass", "confidence": 0.95,
               "reason": "breaks x", "evidence": [{"root": "head", "path": "a.py", "line": 1, "quote": "x", "verified": True}]}
              for r in config.parse("").rules]
-    return Found(ts=ts, run="https://github.com/fork/repo/actions/runs/1", signer_sha=signer,
+    return Found(ts=ts, run="https://github.com/fork/repo/actions/runs/1", signer_sha=signer, repo_id=str(repo_id),
                  signer_uri="https://github.com/gh-bouncer/action/.github/workflows/review.yml@refs/tags/v1", predicate={
         "upstream": "Up/Repo", "pr": n, "head_sha": sha, "head_repo": "fork/repo", "base_sha": "b" * 40,
         "protocol": protocol, "config_digest": digest or config.parse("").digest,
@@ -524,6 +526,27 @@ def test_only_matching_attestations_count():
     gate(gh).process(make_pr(), action="opened")
     wrong = [found("pass", sha="c" * 40), found("pass", n=8)]
     assert gate(gh, verifier=lambda r, s: wrong).process(make_pr()) == "pending"
+    # signed in another repository, whatever name its payload gives
+    elsewhere = found("pass", repo_id=2002)
+    no_id = found("pass", repo_id="")
+    assert gate(gh, verifier=lambda r, s: [elsewhere, no_id]).process(make_pr()) == "pending"
+
+
+def test_fork_rename_does_not_reset_earliest_wins():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    bounce = found("fail", ts=1)  # signed in fork/repo
+    passed = found("pass", ts=2)  # the same fork, renamed, then reviewed again
+    passed.predicate["head_repo"] = "fork/renamed"
+    renamed = make_pr()
+    renamed["head"]["repo"]["full_name"] = "fork/renamed"
+    looked_up = []
+
+    def verifier(head_repo, name):
+        looked_up.append(head_repo)
+        return [passed, bounce]
+    assert gate(gh, verifier=verifier, now=T0 + dt.timedelta(hours=1)).process(renamed) == "fail"
+    assert looked_up == ["fork/renamed"] and gh.state(7)["fails"] == 1
 
 
 def test_review_signed_from_imposter_commit_does_not_count():
@@ -700,6 +723,48 @@ def test_verify_errors_are_not_missing_reviews(fake_gh_bin, monkeypatch, script)
 def test_no_review_is_not_a_verify_error(fake_gh_bin, stderr):
     fake_gh_bin(f'echo "{stderr}" >&2; exit 1\n')
     assert real_verifier("fork/repo", "subject") == []
+
+
+def test_no_attestations_to_download_is_no_review(fake_gh_bin):
+    # gh attestation download says so and exits 0, without writing a file
+    fake_gh_bin('echo "No attestations found for /tmp/x/subject"\n')
+    assert real_verifier("fork/repo", "subject") == []
+
+
+def verified(f):
+    """`gh attestation verify --format json` output for a Found."""
+    stmt = {"_type": "https://in-toto.io/Statement/v1", "predicateType": PREDICATE_TYPE, "predicate": f.predicate}
+    return {"attestation": {"bundle": {
+                "dsseEnvelope": {"payload": base64.b64encode(json.dumps(stmt).encode()).decode()},
+                "verificationMaterial": {"tlogEntries": [{"integratedTime": str(f.ts)}]}}},
+            "verificationResult": {"signature": {"certificate": {
+                "runInvocationURI": f.run, "buildSignerDigest": f.signer_sha, "buildSignerURI": f.signer_uri,
+                "sourceRepositoryURI": f"https://github.com/{f.predicate['head_repo']}",
+                "sourceRepositoryIdentifier": f.repo_id}}}}
+
+
+def test_verifier_finds_reviews_signed_before_the_fork_was_renamed(fake_gh_bin, tmp_path):
+    # The fork's attestations, fetched by its current name, include one signed under its old name.
+    # gh only verifies that one when asked for the owner, not for the repository by its new name.
+    bounce, passed = found("fail", ts=1), found("pass", ts=2)
+    passed.predicate["head_repo"] = "fork/renamed"
+    (tmp_path / "verified.json").write_text(json.dumps([verified(passed), verified(bounce)]))
+    log = tmp_path / "gh.log"
+    fake_gh_bin(f'''echo "$*" >> {log}
+case "$2" in
+  download) echo '{{"mediaType": "bundle"}}' > sha256:abc.jsonl; echo "Wrote attestations to file sha256:abc.jsonl." ;;
+  verify) cat {tmp_path / "verified.json"} ;;
+esac
+''')
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    renamed = make_pr()
+    renamed["head"]["repo"]["full_name"] = "fork/renamed"
+    assert gate(gh, verifier=real_verifier).process(renamed) == "fail"
+    download, verify = log.read_text().splitlines()
+    assert download.startswith("attestation download ") and " --repo fork/renamed " in download
+    assert verify.startswith("attestation verify ") and " --owner fork " in verify and "--repo" not in verify
+    assert verify.split(" --bundle ")[1].split()[0].endswith("/sha256:abc.jsonl")
 
 
 class SweepGH(FakeGitHub):

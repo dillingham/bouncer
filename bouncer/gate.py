@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import glob
 import json
 import os
 import re
@@ -53,6 +54,9 @@ class Found:
     # From the signing certificate: the review.yml commit that ran, and its full workflow ref.
     signer_sha: str = ""
     signer_uri: str = ""
+    # Also from the certificate: the id of the repository the review ran in (the fork), which
+    # stays the same when the repository is renamed.
+    repo_id: str = ""
 
 
 def parse_verify_output(data: list) -> list[Found]:
@@ -80,7 +84,8 @@ def parse_verify_output(data: list) -> list[Found]:
             cert = item["verificationResult"]["signature"]["certificate"]
             found.append(Found(ts=ts, predicate=stmt["predicate"], run=cert.get("runInvocationURI", ""),
                                signer_sha=str(cert.get("buildSignerDigest") or "").lower(),
-                               signer_uri=str(cert.get("buildSignerURI") or "")))
+                               signer_uri=str(cert.get("buildSignerURI") or ""),
+                               repo_id=str(cert.get("sourceRepositoryIdentifier") or "")))
         except (KeyError, TypeError, ValueError):
             continue
     found.sort(key=lambda f: f.ts)
@@ -96,32 +101,60 @@ class VerifyError(RuntimeError):
 NO_REVIEW = ("no attestations found", "sigstore verification failed", "policy verification failed")
 
 
+def _gh_attestation(args: list[str], cwd: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["gh", "attestation", *args], capture_output=True, text=True, timeout=180, cwd=cwd)
+    except subprocess.TimeoutExpired:
+        raise VerifyError(f"gh attestation {args[0]} timed out after 180 s") from None
+
+
+def _tail(res: subprocess.CompletedProcess) -> str:
+    return " | ".join(((res.stderr or "").strip() or (res.stdout or "").strip()).splitlines()[-3:])
+
+
+def _no_review(res: subprocess.CompletedProcess) -> bool:
+    return any(s in f"{res.stderr or ''}\n{res.stdout or ''}".lower() for s in NO_REVIEW)
+
+
 def gh_verifier(head_repo: str, name: str, signer_workflow: str, signer_digest: str | None) -> list[Found]:
+    """The fork's signed reviews of the subject, verified.
+
+    They're downloaded by the fork's current name, then verified for its owner rather than its
+    name: a review signed before the fork was renamed names the old name in its certificate, and
+    verifying with --repo would leave it out. The gate matches the fork by the repository id in
+    the certificate instead, which a rename doesn't change (see Gate._signed_reviews)."""
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "subject")
         with open(path, "wb") as f:
             f.write(name.encode())
+        res = _gh_attestation(["download", path, "--repo", head_repo, "--predicate-type", PREDICATE_TYPE,
+                               "--limit", "300"], d)
+        bundles = glob.glob(os.path.join(d, "*.jsonl"))
+        if res.returncode != 0 or not bundles:
+            if _no_review(res):
+                print(f"  no review for {name}: {_tail(res)}")
+                return []
+            raise VerifyError(_tail(res) or f"gh attestation download exited with {res.returncode} and wrote no file")
+        with open(bundles[0]) as f:
+            if not f.read().strip():
+                return []
         cmd = [
-            "gh", "attestation", "verify", path,
-            "--repo", head_repo,
+            "verify", path,
+            "--bundle", bundles[0],
+            "--owner", head_repo.split("/", 1)[0],
             "--signer-workflow", signer_workflow,
             "--deny-self-hosted-runners",
             "--predicate-type", PREDICATE_TYPE,
-            "--limit", "300",
             "--format", "json",
         ]
         if signer_digest:
             cmd += ["--signer-digest", signer_digest]
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        except subprocess.TimeoutExpired:
-            raise VerifyError("gh attestation verify timed out after 180 s") from None
+        res = _gh_attestation(cmd, d)
     if res.returncode != 0:
-        tail = " | ".join((res.stderr or "").strip().splitlines()[-3:])
-        if any(s in (res.stderr or "").lower() for s in NO_REVIEW):
-            print(f"  no verified review for {name}: {tail}")
+        if _no_review(res):
+            print(f"  no verified review for {name}: {_tail(res)}")
             return []
-        raise VerifyError(tail or f"gh attestation verify exited with {res.returncode}")
+        raise VerifyError(_tail(res) or f"gh attestation verify exited with {res.returncode}")
     try:
         data = json.loads(res.stdout or "[]")
     except ValueError:
@@ -459,7 +492,7 @@ class Gate:
         if not head_repo:
             return self._no_fork(n, sticky, state, labels, head_sha)
         try:
-            found = self._signed_reviews(n, head_repo, head_sha)
+            found = self._signed_reviews(n, head_repo, head_sha, pr["head"]["repo"].get("id"))
         except VerifyError as e:
             # Not the same as no review: one may well exist. Try again next run, and don't let the
             # deadline close the pull request on an outage.
@@ -521,17 +554,21 @@ class Gate:
         self.log(f"#{n}: fork deleted")
         return "closed-no-fork"
 
-    def _signed_reviews(self, n: int, head_repo: str, head_sha: str) -> list[Found]:
-        """Verified reviews of exactly this PR and commit, signed by the bouncer's review.yml from
-        the gate's own history, earliest first. Raises VerifyError if that can't be determined."""
+    def _signed_reviews(self, n: int, head_repo: str, head_sha: str, head_repo_id) -> list[Found]:
+        """Verified reviews of exactly this PR and commit, made in the pull request's fork and
+        signed by the bouncer's review.yml from the gate's own history, earliest first. Raises
+        VerifyError if that can't be determined.
+
+        The fork is matched by the repository id in the signing certificate, not by its name: a
+        review signed before the fork was renamed is still this fork's, and still comes first."""
         found = [
             f for f in self.verifier(head_repo, subject_name(self.repo, n, head_sha))
             if str(f.predicate.get("upstream", "")).lower() == self.repo.lower()
             and int(f.predicate.get("pr", -1)) == n
             and f.predicate.get("head_sha") == head_sha
-            and str(f.predicate.get("head_repo", "")).lower() == head_repo.lower()
+            and f.repo_id and f.repo_id == str(head_repo_id)
         ]
-        return [f for f in found if self._signed_by_gate_history(f)]
+        return sorted((f for f in found if self._signed_by_gate_history(f)), key=lambda f: f.ts)
 
     def _wrong_base(self, pr: dict, labels: set[str], sticky: dict | None, state: dict | None,
                     base: str, allowed: list[str]) -> str:

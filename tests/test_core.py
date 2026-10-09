@@ -422,6 +422,8 @@ def test_parse_real_gh_output_and_ordering():
     # the signer commit and workflow ref come from the certificate
     assert found[0].signer_sha == "09b495c3f12c7881b3cc17209a327792065c1a1d"
     assert found[0].signer_uri.endswith("/.github/workflows/attest.yml@09b495c3f12c7881b3cc17209a327792065c1a1d")
+    # and the id of the repository it ran in, which a rename doesn't change
+    assert found[0].repo_id == "804070735"
 
 
 # --- workspace and evidence -----------------------------------------------------
