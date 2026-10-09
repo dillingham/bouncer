@@ -1,7 +1,7 @@
 """Contributor side. Runs inside the reusable review workflow, in the contributor's fork,
 on the contributor's API key.
 
-  python -m bouncer.review resolve --pr N     -> GITHUB_OUTPUT: upstream, base_sha, head_sha, ...
+  python -m bouncer.review resolve --pr N [--upstream owner/repo]  -> GITHUB_OUTPUT: upstream, base_sha, head_sha, ...
   python -m bouncer.review run --pr N ...     -> out/predicate.json, subject outputs (no verdict)
   python -m bouncer.review report --out-dir   -> after signing: out/report.md, step summary, verdict output
 
@@ -16,6 +16,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -65,6 +66,9 @@ def cmd_resolve(args, sleep=time.sleep) -> None:
     auto = os.environ.get("GITHUB_EVENT_NAME") == "push"
     stop = skip if auto else fail
 
+    wanted = (getattr(args, "upstream", "") or "").strip()
+    if wanted and not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", wanted):
+        fail(f"'{wanted}' is not a repository name. Use owner/repo, for example octo-org/widget.")
     repo = gh.get(f"/repos/{me}")
     parent = (repo.get("parent") or {}).get("full_name")
     if not repo.get("fork") or not parent:
@@ -73,26 +77,36 @@ def cmd_resolve(args, sleep=time.sleep) -> None:
         stop("No ANTHROPIC_API_KEY secret in this fork. Add it under Settings > Secrets and variables > Actions "
              "to run bouncer reviews.")
 
+    # Where the pull request can be: the upstream input, else this fork's parent, then the root
+    # of the fork network (for a fork of a fork, the parent is the intermediate fork).
+    source = (repo.get("source") or {}).get("full_name")
+    candidates = [wanted] if wanted else [parent] + ([source] if source and source.lower() != parent.lower() else [])
     pr_arg = (args.pr or "").strip().lstrip("#")
     branch = os.environ.get("GITHUB_REF_NAME", "")
-    if pr_arg:
-        if not pr_arg.isdigit():
-            fail(f"'{pr_arg}' is not a pull request number.")
-        pr = gh.get_or_none(f"/repos/{parent}/pulls/{pr_arg}")
-        if not pr:
-            fail(f"Pull request #{pr_arg} was not found in {parent}.")
-    else:
-        owner = me.split("/")[0]
-        head = urllib.parse.quote(f"{owner}:{branch}", safe=":")
-        prs = gh.get(f"/repos/{parent}/pulls?state=open&head={head}") or []
-        if not prs:
-            stop(f"No open pull request from {owner}:{branch} to {parent}. Pick your pull request's branch "
-                 "under 'Use workflow from', or enter the pull request number.")
-        pr = prs[0]
+    owner = me.split("/")[0]
+    if pr_arg and not pr_arg.isdigit():
+        fail(f"'{pr_arg}' is not a pull request number.")
+    pr = parent = None
+    for cand in candidates:
+        if pr_arg:
+            hit = gh.get_or_none(f"/repos/{cand}/pulls/{pr_arg}")
+        else:
+            head = urllib.parse.quote(f"{owner}:{branch}", safe=":")
+            hit = (gh.get_or_none(f"/repos/{cand}/pulls?state=open&head={head}") or [None])[0]
+        if hit and (pr is None or _head_repo(hit).lower() == me.lower()):
+            pr, parent = hit, cand
+            if _head_repo(hit).lower() == me.lower():
+                break
+    where = " or ".join(candidates)
+    if pr is None and pr_arg:
+        fail(f"Pull request #{pr_arg} was not found in {where}.")
+    if pr is None:
+        stop(f"No open pull request from {owner}:{branch} to {where}. Pick your pull request's branch "
+             "under 'Use workflow from', or enter the pull request number.")
     n = pr["number"]
     if pr["state"] != "open":
         stop(f"{parent}#{n} is {pr['state']}. Reopen it first, then run the review.")
-    head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name", "")
+    head_repo = _head_repo(pr)
     if head_repo.lower() != me.lower():
         stop(f"{parent}#{n} comes from {head_repo or 'a deleted repository'}, not {me}. "
              "Run the review from the fork the pull request was opened from.")
@@ -109,6 +123,10 @@ def cmd_resolve(args, sleep=time.sleep) -> None:
             skip(f"{parent}#{n} hasn't picked up commit {pushed[:12]} yet. Push again or run the review manually.")
 
     _out(skip="false", pr=n, upstream=parent, head_repo=me, base_sha=pr["base"]["sha"], head_sha=pr["head"]["sha"])
+
+
+def _head_repo(pr: dict) -> str:
+    return ((pr.get("head") or {}).get("repo") or {}).get("full_name", "")
 
 
 def _find_contributing(base: Path) -> str:
@@ -243,6 +261,7 @@ def main(argv=None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("resolve")
     r.add_argument("--pr", default="")
+    r.add_argument("--upstream", default="")
     x = sub.add_parser("run")
     for a in ("--pr", "--upstream", "--head-repo", "--base-sha", "--head-sha", "--base-dir", "--head-dir", "--out-dir"):
         x.add_argument(a, required=True)

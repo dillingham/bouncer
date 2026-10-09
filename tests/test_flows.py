@@ -909,7 +909,7 @@ def _pr(n=3, sha="s1", state="open", head="me/repo"):
     return {"number": n, "state": state, "head": {"sha": sha, "repo": {"full_name": head}}, "base": {"sha": "b"}}
 
 
-def run_resolve(monkeypatch, tmp_path, gh, event, pr_arg="", key="k", sha="s1", ref="feature"):
+def run_resolve(monkeypatch, tmp_path, gh, event, pr_arg="", key="k", sha="s1", ref="feature", upstream=""):
     from bouncer import review as review_mod
 
     monkeypatch.setattr(review_mod, "GitHub", lambda: gh)
@@ -920,7 +920,7 @@ def run_resolve(monkeypatch, tmp_path, gh, event, pr_arg="", key="k", sha="s1", 
         monkeypatch.setenv(k, v)
     code = 0
     try:
-        review_mod.cmd_resolve(NS(pr=pr_arg), sleep=lambda s: None)
+        review_mod.cmd_resolve(NS(pr=pr_arg, upstream=upstream), sleep=lambda s: None)
     except SystemExit as e:
         code = e.code
     return code, dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
@@ -947,3 +947,31 @@ def test_resolve_push_waits_for_pr_to_catch_up(monkeypatch, tmp_path):
     assert code == 0 and out["head_sha"] == "new"
     gh = ResolveGH([_pr(sha="old")], {3: _pr(sha="old")})
     assert run_resolve(monkeypatch, tmp_path, gh, "push", sha="new")[1] == {"skip": "true"}
+
+
+class ForkOfForkGH(ResolveGH):
+    """me/repo is a fork of bob/repo, itself a fork of up/repo, where the pull request is."""
+
+    def get(self, path, accept=None):
+        self.calls.append(path)
+        if path == "/repos/me/repo":
+            return {"fork": True, "parent": {"full_name": "bob/repo"}, "source": {"full_name": "up/repo"}}
+        if path.lower().startswith("/repos/up/repo/pulls?"):  # GitHub ignores case in names
+            return self.prs
+        if path.lower() == "/repos/up/repo/pulls/3":
+            return _pr()
+        raise KeyError(path)
+
+
+@pytest.mark.parametrize("pr_arg,upstream", [("3", ""), ("", ""), ("3", "up/repo"), ("", "Up/Repo")])
+def test_resolve_fork_of_a_fork(monkeypatch, tmp_path, pr_arg, upstream):
+    gh = ForkOfForkGH([_pr()])
+    code, out = run_resolve(monkeypatch, tmp_path, gh, "workflow_dispatch", pr_arg=pr_arg, upstream=upstream)
+    assert code == 0 and out["upstream"].lower() == "up/repo" and out["pr"] == "3"
+    # with the input given, only that repository is asked
+    assert not upstream or not any(c.startswith("/repos/bob/") for c in gh.calls)
+
+
+def test_resolve_rejects_a_malformed_upstream(monkeypatch, tmp_path, capsys):
+    code, out = run_resolve(monkeypatch, tmp_path, ResolveGH([_pr()]), "workflow_dispatch", upstream="up/repo/../x")
+    assert code == 1 and "owner/repo" in capsys.readouterr().out

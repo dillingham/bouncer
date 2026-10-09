@@ -16,6 +16,10 @@ on:
         description: Pull request number
         required: false
         type: string
+      upstream:
+        description: Repository the pull request is in (owner/repo), if not this fork's parent
+        required: false
+        type: string
   push:
 
 permissions: {}
@@ -50,5 +54,6 @@ jobs:
     uses: gh-bouncer/action/.github/workflows/review.yml@v1
     with:
       pr: ${{ inputs.pr || '' }}
+      upstream: ${{ inputs.upstream || '' }}
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

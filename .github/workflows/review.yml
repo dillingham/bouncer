@@ -5,7 +5,7 @@
 # the contributor's ANTHROPIC_API_KEY, reviews the pull request against the maintainers'
 # .bouncer.yml, and signs the result with a GitHub artifact attestation.
 #
-# The contributor controls only the PR number and the key. The model, effort, rules,
+# The contributor controls only the PR number, which repository it's in, and the key. The model, effort, rules,
 # prompt and API endpoint all come from this repository and the upstream default branch, and
 # the gate only accepts attestations signed by this exact workflow on a GitHub-hosted runner.
 #
@@ -19,6 +19,11 @@ on:
     inputs:
       pr:
         description: Pull request number in the upstream repository. Empty = the open PR from this branch.
+        required: false
+        type: string
+        default: ""
+      upstream:
+        description: The repository the pull request is in (owner/repo). Empty = this fork's parent, then the root of its fork network.
         required: false
         type: string
         default: ""
@@ -76,7 +81,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
           PR: ${{ inputs.pr }}
-        run: python -m bouncer.review resolve --pr "$PR"
+          UPSTREAM: ${{ inputs.upstream }}
+        run: python -m bouncer.review resolve --pr "$PR" --upstream "$UPSTREAM"
 
       - name: Check out upstream base branch (read only)
         if: steps.pr.outputs.skip != 'true'
