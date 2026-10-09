@@ -437,7 +437,10 @@ class Gate:
             action = payload.get("action")
             if action not in ("opened", "reopened", "synchronize", "ready_for_review"):
                 return
-            self.process(payload["pull_request"], action=action, sender=(payload.get("sender") or {}).get("login"))
+            # The payload is a snapshot from when the event fired, and the run may start much later
+            # (queued behind other runs for this PR), so labels, draft state and head are read fresh.
+            pr = self.gh.get(f"/repos/{self.repo}/pulls/{int(payload['pull_request']['number'])}")
+            self.process(pr, action=action, sender=(payload.get("sender") or {}).get("login"))
         elif event_name == "issue_comment":
             issue = payload.get("issue") or {}
             body = ((payload.get("comment") or {}).get("body") or "").strip()

@@ -1,4 +1,5 @@
 """Agent loop with a fake Anthropic client, and gate flows with a fake GitHub."""
+import copy
 import datetime as dt
 import json
 from types import SimpleNamespace as NS
@@ -93,16 +94,35 @@ IMPOSTER = "6" * 40  # one that only exists in a fork of gh-bouncer/action
 
 
 class FakeGitHub:
+    """GitHub as the gate sees it. The live pull request is the last one handed to the gate (see
+    see()), with the labels, draft flag and open/closed state the gate itself left on it."""
+
     def __init__(self, maintainers=()):
         self.comments = {}
         self.labels = {}
         self.closed = set()
+        self.drafts = {}
+        self.prs = {}
         self.graphql_calls = []
         self.maintainers = set(maintainers)
         self.next_id = 1
         # compare API of the action repo: signer commit -> status against the gate's ref
         self.compare = {SIGNER: "ahead"}
         self.compare_calls = []
+
+    def see(self, pr):
+        """The pull request is now at this head/base. Labels and draft state come from the payload
+        only the first time; after that the gate's own changes are the truth."""
+        n = pr["number"]
+        self.prs[n] = copy.deepcopy(pr)
+        self.labels.setdefault(n, {lb["name"] for lb in pr.get("labels", [])})
+        self.drafts.setdefault(n, bool(pr.get("draft")))
+
+    def pr(self, n):
+        p = copy.deepcopy(self.prs[n])
+        p.update(labels=[{"name": x} for x in sorted(self.labels.get(n, ()))], draft=self.drafts.get(n, False),
+                 state="closed" if n in self.closed else "open")
+        return p
 
     def _num(self, path, idx):
         return int(path.split("/")[idx])
@@ -127,6 +147,8 @@ class FakeGitHub:
             return {"status": status}
         if path == "/repos/gh-bouncer/action":
             return {"default_branch": "main"}
+        if path.startswith("/repos/up/repo/pulls/"):
+            return self.pr(self._num(path, 5))
         raise AssertionError(path)
 
     def post(self, path, body):
@@ -160,7 +182,12 @@ class FakeGitHub:
         self.labels.get(n, set()).discard(path.rsplit("/", 1)[1].replace("%3A", ":"))
 
     def graphql(self, q, v):
-        self.graphql_calls.append(q.split("(")[1].split("{")[-1] if False else q)
+        self.graphql_calls.append(q)
+        n = int(v["id"].split("_")[1])
+        if "convertPullRequestToDraft" in q:
+            self.drafts[n] = True
+        elif "markPullRequestReadyForReview" in q:
+            self.drafts[n] = False
         return {}
 
     def state(self, n):
@@ -174,7 +201,7 @@ T0 = dt.datetime(2026, 10, 9, 12, 0, tzinfo=dt.timezone.utc)
 
 
 def make_pr(n=7, sha="a" * 40, assoc="NONE", labels=(), draft=False, author="drive-by", base="main"):
-    return {"number": n, "state": "open", "node_id": "PR_x", "draft": draft, "author_association": assoc,
+    return {"number": n, "state": "open", "node_id": f"PR_{n}", "draft": draft, "author_association": assoc,
             "user": {"login": author}, "labels": [{"name": x} for x in labels],
             "head": {"sha": sha, "repo": {"full_name": "fork/repo"}},
             "base": {"ref": base, "repo": {"full_name": "up/repo", "default_branch": "main"}}}
@@ -193,8 +220,17 @@ def found(outcome, sha="a" * 40, n=7, ts=1, digest=None, protocol=REVIEW_PROTOCO
         "review": {"summary": "s", "rules": rules, "injection_detected": False, "injection_notes": ""}})
 
 
+class TestGate(Gate):
+    __test__ = False
+
+    def process(self, pr, action=None, sender=None):
+        if isinstance(self.gh, FakeGitHub):
+            self.gh.see(pr)  # what the test hands the gate is the pull request's current head
+        return super().process(pr, action=action, sender=sender)
+
+
 def gate(gh, verifier=lambda r, s: [], now=T0, cfg_text="", action_ref="v1", log=lambda *_: None):
-    return Gate(gh, "up/repo", config.parse(cfg_text), verifier, now=now, log=log, action_ref=action_ref)
+    return TestGate(gh, "up/repo", config.parse(cfg_text), verifier, now=now, log=log, action_ref=action_ref)
 
 
 def test_new_pr_gets_instructions_then_passes():
@@ -211,6 +247,26 @@ def test_new_pr_gets_instructions_then_passes():
     assert gh.labels[7] == {"bouncer:pass"} and 7 not in gh.closed
     assert any("Passed" in b for b in gh.bodies(7))
     assert any("markPullRequestReadyForReview" in q for q in gh.graphql_calls)
+
+
+A, B = "a" * 40, "b" * 40
+
+
+def test_queued_event_reads_the_pr_fresh_not_its_payload():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(sha=A), action="opened")
+    # A push to B fires synchronize (payload: labels=[pending], draft) but its run is queued
+    # behind a /bouncer check run that applies a pass for A.
+    stale_payload = make_pr(sha=B, labels=["bouncer:pending"], draft=True)
+    assert gate(gh, verifier=lambda r, s: [found("pass", sha=A)]).process(
+        make_pr(sha=A, labels=["bouncer:pending"], draft=True)) == "pass"
+    gh.see(make_pr(sha=B))  # the pull request is at B now
+    before = len(gh.graphql_calls)
+    gate(gh).handle("pull_request_target", {"action": "synchronize", "pull_request": stale_payload,
+                                            "sender": {"login": "drive-by"}})
+    assert gh.state(7)["sha"] == B and gh.state(7)["status"] == "pending"
+    assert gh.labels[7] == {"bouncer:pending"}  # the pass label is gone from the unreviewed commit
+    assert any("convertPullRequestToDraft" in q for q in gh.graphql_calls[before:])
 
 
 def test_fail_closes_and_counts_round():
