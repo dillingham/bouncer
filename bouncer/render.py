@@ -84,6 +84,26 @@ def parse_state(comments: list[dict]) -> tuple[dict | None, dict | None]:
     return None, None
 
 
+def find_state(gh, repo: str, n: int) -> tuple[dict | None, dict | None]:
+    """The bouncer state comment of a pull request, and its state (see parse_state).
+
+    It's usually among the first comments, so the first page is read first. On a busy pull
+    request it can be anywhere (say, the bouncer was installed long after it opened), so the
+    rest is read from the newest page back, without a page limit: missing the comment would
+    start a new review round, and post another state comment, on every run."""
+    url = f"/repos/{repo}/issues/{n}/comments?per_page=100"
+    items, links = gh.page(url)
+    sticky, state = parse_state(items)
+    m = re.search(r"[?&]page=(\d+)", links.get("last", ""))
+    if sticky or not m:
+        return sticky, state
+    for p in range(int(m.group(1)), 1, -1):
+        sticky, state = parse_state(gh.page(f"{url}&page={p}")[0])
+        if sticky:
+            return sticky, state
+    return None, None
+
+
 # Why a signed review of the current commit doesn't count (see Gate._stale), for the contributor.
 STALE_NOTES = {
     "config": "Your signed review doesn't count: the maintainers changed the bouncer settings after it ran. "

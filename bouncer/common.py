@@ -146,6 +146,11 @@ class GitHub:
                 return None
             raise
 
+    def page(self, path: str) -> tuple[list, dict]:
+        """One page of a list endpoint, and its Link relations ({"next": url, "last": url, ...})."""
+        items, link = self._request("GET", path)
+        return items or [], {m.group(2): m.group(1) for m in re.finditer(r'<([^>]+)>;\s*rel="(\w+)"', link or "")}
+
     def paginate(self, path: str, limit: int = 1000) -> list:
         items: list = []
         sep = "&" if "?" in path else "?"

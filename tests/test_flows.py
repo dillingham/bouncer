@@ -190,8 +190,17 @@ class FakeGitHub:
 
     def paginate(self, path, limit=1000):
         if path.endswith("/comments"):
-            return [dict(c) for c in self.comments.get(self._num(path, 5), [])]
+            return [dict(c) for c in self.comments.get(self._num(path, 5), [])][:limit]
         return []
+
+    def page(self, path):
+        """Comments, 100 per page, with a Link "last" relation like GitHub's."""
+        self.pages_read = getattr(self, "pages_read", 0) + 1
+        comments = self.comments.get(self._num(path, 5), [])
+        p = int(path.split("&page=")[1]) if "&page=" in path else 1
+        last = max(1, -(-len(comments) // 100))
+        links = {"last": f"https://api.github.com/x/comments?per_page=100&page={last}"} if last > 1 else {}
+        return [dict(c) for c in comments[(p - 1) * 100: p * 100]], links
 
     def get_or_none(self, path, accept=None):
         if "/collaborators/" in path:
@@ -625,6 +634,23 @@ def test_retargeted_pr_gets_a_review_round():
     st = gh.state(7)
     assert st["status"] == "pending" and st["rounds"] == 1 and st["fails"] == 0
     assert gh.labels[7] == {"bouncer:pending"} and "gh bouncer" in gh.bodies(7)[0]
+
+
+def test_state_comment_found_on_a_busy_pr():
+    gh = FakeGitHub()
+    gh.comments[7] = [{"id": 10_000 + i, "user": {"login": "someone"}, "body": "+1"} for i in range(550)]
+    gate(gh).process(make_pr(), action="opened")  # the state comment is #551, on page 6
+    for minutes in (10, 20):
+        gh.pages_read = 0
+        assert gate(gh, now=T0 + dt.timedelta(minutes=minutes)).process(make_pr()) == "pending"
+        assert gh.pages_read == 2  # the first page, then the last one
+    assert len([c for c in gh.comments[7] if "bouncer:state" in c["body"]]) == 1
+    assert gh.state(7)["rounds"] == 1
+    # usually it's on the first page, and nothing else is read
+    gh.comments[7].insert(0, gh.comments[7].pop())
+    gh.pages_read = 0
+    gate(gh).process(make_pr())
+    assert gh.pages_read == 1
 
 
 def test_forged_state_comment_ignored():

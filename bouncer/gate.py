@@ -21,7 +21,7 @@ from typing import Callable
 from . import config as config_mod
 from .common import MIN_REVIEW_PROTOCOL, PREDICATE_TYPE, GitHub, GitHubError, subject_name
 from .decide import decide
-from .render import STALE_NOTES, clean, instructions, parse_state, review_markdown, state_block
+from .render import STALE_NOTES, clean, find_state, instructions, parse_state, review_markdown, state_block
 
 L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
 LABEL_COLORS = {L_PENDING: "fbca04", L_PASS: "0e8a16", L_FAIL: "b60205", L_SKIP: "c5def5"}
@@ -317,8 +317,7 @@ class Gate:
             self.log(f"#{n}: exempt ({why})")
             return "exempt"
 
-        comments = self.gh.paginate(f"/repos/{self.repo}/issues/{n}/comments", limit=500)
-        sticky, state = parse_state(comments)
+        sticky, state = find_state(self.gh, self.repo, n)
         self._persisted[n] = _snapshot(state)
         head_sha = pr["head"]["sha"]
         head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name", "")
