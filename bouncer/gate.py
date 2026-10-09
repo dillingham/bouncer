@@ -559,7 +559,7 @@ class Gate:
     def handle(self, event_name: str, payload: dict) -> None:
         if event_name in ("pull_request_target", "pull_request"):
             action = payload.get("action")
-            if action not in ("opened", "reopened", "synchronize", "ready_for_review"):
+            if action not in ("opened", "reopened", "synchronize", "ready_for_review", "edited"):
                 return
             # The payload is a snapshot from when the event fired, and the run may start much later
             # (queued behind other runs for this PR), so labels, draft state and head are read fresh.

@@ -722,6 +722,15 @@ def test_state_comment_found_on_a_busy_pr():
     assert gh.pages_read == 1
 
 
+def test_retargeting_after_a_pass_is_checked():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    gate(gh, verifier=lambda r, s: [found("pass")]).process(make_pr())
+    gh.see(make_pr(base="dev"))  # the contributor changes the base branch: an `edited` event
+    gate(gh).handle("pull_request_target", {"action": "edited", "pull_request": {"number": 7}, "sender": {"login": "drive-by"}})
+    assert gh.state(7)["status"] == "wrong_base" and gh.labels[7] == {"bouncer:fail"} and 7 in gh.closed
+
+
 def test_forged_state_comment_ignored():
     gh = FakeGitHub()
     gh.comments[7] = [{"id": 99, "user": {"login": "drive-by"},
