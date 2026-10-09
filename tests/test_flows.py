@@ -438,7 +438,75 @@ def test_fail_closes_and_counts_round():
     gate(gh).process(make_pr(), action="opened")
     assert gate(gh, verifier=lambda r, s: [found("fail")]).process(make_pr()) == "fail"
     assert 7 in gh.closed and gh.state(7)["fails"] == 1 and "bouncer:fail" in gh.labels[7]
-    assert any("2 rounds left" in b for b in gh.bodies(7))
+    sticky, report = gh.bodies(7)
+    url = "https://github.com/up/repo/pull/7"
+    steps = (f"**To try again** (2 review attempts left): push your fixes as new commits, reopen this pull request, "
+             f"then run `gh bouncer {url}`. Don't force-push while it's closed: GitHub won't reopen a pull request "
+             "whose branch was force-pushed. If you think the review got it wrong, say so in a comment.")
+    assert sticky.startswith(f"### 🚪 Bouncer\n\n⛔ **Bounced** and closed. [See why]({url}#issuecomment-2)\n\n{steps}")
+    assert report.startswith("### ⛔ Bouncer review: Bounced") and f"\n{steps}\n" in report
+
+
+def sticky_text(gh, n=7):
+    return gh.bodies(n)[0].split("\n\n<!-- bouncer:state")[0]
+
+
+def test_status_texts():
+    url = "https://github.com/up/repo/pull/7"
+    # passed
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    gate(gh, verifier=lambda r, s: [found("pass")]).process(make_pr())
+    assert sticky_text(gh) == f"### 🚪 Bouncer\n\n✅ **Passed.** Ready for a maintainer. [Read the review]({url}#issuecomment-2)"
+    # passed, and later commits aren't re-reviewed
+    gate(gh, cfg_text="gate: {rereview_after_pass: false}").process(make_pr(sha=B))
+    assert sticky_text(gh) == ("### 🚪 Bouncer\n\n✅ **Passed** on an earlier commit. This project doesn't re-review "
+                               f"later commits. [Read the review]({url}#issuecomment-2)")
+    # bounced and left open; then the last attempt
+    gh = FakeGitHub()
+    cfg = "gate: {close_on_fail: false, max_attempts: 1}"
+    gate(gh, cfg_text=cfg).process(make_pr(), action="opened")
+    gate(gh, verifier=lambda r, s: [found("fail")], cfg_text=cfg).process(make_pr())
+    assert sticky_text(gh) == (f"### 🚪 Bouncer\n\n⛔ **Bounced.** [See why]({url}#issuecomment-2) Left open for a maintainer "
+                               "to confirm.\n\nNo review attempts left. If you think the review got it wrong, say so in a comment.")
+    gate(gh, cfg_text=cfg).process(make_pr(sha=B))
+    assert sticky_text(gh) == ("### 🚪 Bouncer\n\nThis pull request has no review attempts left (this project allows "
+                               "1 review attempt), so new commits aren't reviewed. Left open for a maintainer to decide.")
+    # expired, with attempts left and without
+    gh = FakeGitHub()
+    gate(gh, cfg_text="gate: {max_attempts: 2}").process(make_pr(), action="opened")
+    gate(gh, now=T0 + dt.timedelta(hours=49), cfg_text="gate: {max_attempts: 2}").process(make_pr())
+    assert sticky_text(gh) == ("### 🚪 Bouncer\n\nNo signed review arrived by the deadline (Sun Oct 11, 12:00 UTC), so this "
+                               f"pull request was closed. To try again, reopen it and run `gh bouncer {url}` (1 review attempt left).")
+    later = T0 + dt.timedelta(hours=50)
+    gate(gh, now=later, cfg_text="gate: {max_attempts: 2}").process(make_pr(), action="reopened", sender="drive-by")
+    gate(gh, now=later + dt.timedelta(hours=49), cfg_text="gate: {max_attempts: 2}").process(make_pr())
+    assert sticky_text(gh) == ("### 🚪 Bouncer\n\nNo signed review arrived by the deadline (Tue Oct 13, 14:00 UTC), so this "
+                               "pull request was closed. It has no review attempts left. A maintainer can still reopen it "
+                               "if they'd like to take a look.")
+    # overridden by a maintainer; reopened by the author at the same commit
+    gh = FakeGitHub(maintainers={"maint"})
+    gate(gh).process(make_pr(), action="opened")
+    gate(gh, verifier=lambda r, s: [found("fail")]).process(make_pr())
+    gate(gh).process(make_pr(), action="reopened", sender="drive-by")
+    assert gh.bodies(7)[-1] == ("### 🚪 Bouncer\n\nThis commit was already reviewed and bounced, so the pull request was closed "
+                                f"again. Push your fixes as new commits first, then reopen it and run `gh bouncer {url}`.")
+    gate(gh).process(make_pr(), action="reopened", sender="maint")
+    assert sticky_text(gh) == ("### 🚪 Bouncer\n\nA maintainer reopened this pull request, so the bounce no longer applies. "
+                               "The bouncer won't review later commits either.")
+    # fork deleted while waiting
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    gate(gh).process(no_fork())
+    assert sticky_text(gh) == ("### 🚪 Bouncer\n\nThis pull request's fork was deleted, so it can't be reviewed or merged. "
+                               "Closing it. To send this change again, open a new pull request from a fork.")
+    # one attempt only: the instructions and the bounce say so
+    gh = FakeGitHub()
+    gate(gh, cfg_text="gate: {max_attempts: 1}").process(make_pr(), action="opened")
+    assert "· 1 review attempt left" in gh.bodies(7)[0]
+    gate(gh, verifier=lambda r, s: [found("fail")], cfg_text="gate: {max_attempts: 1}").process(make_pr())
+    assert sticky_text(gh).endswith("\n\nNo review attempts left. A maintainer can still reopen it if they'd like to take a "
+                                    "look. If you think the review got it wrong, say so in a comment.")
 
 
 def test_only_matching_attestations_count():

@@ -23,7 +23,7 @@ def clean(text: str, limit: int = 1500) -> str:
     return t.strip()
 
 
-def _n(k: int, word: str) -> str:
+def plural(k: int, word: str) -> str:
     return f"{k} {word}{'' if k == 1 else 's'}"
 
 
@@ -211,7 +211,7 @@ def instructions(pr: int, head_repo: str, upstream: str, deadline: str, attempts
         f"gh bouncer {url}",
         "```",
         "",
-        f"**Deadline:** {deadline} · {_n(attempts_left, 'review attempt')} left",
+        f"**Deadline:** {deadline} · {plural(attempts_left, 'review attempt')} left",
         "",
         "<details><summary>How it works</summary>",
         "",
@@ -235,3 +235,52 @@ def instructions(pr: int, head_repo: str, upstream: str, deadline: str, attempts
     lines += [f"- `{r.id}` ({kind(r.hard)}): {clean(r.description, 300)}" for r in sorted(cfg.rules, key=lambda r: not r.hard)]
     lines += ["", "</details>"]
     return "\n".join(lines)
+
+
+DONT_FORCE_PUSH = ("Don't force-push while it's closed: GitHub won't reopen a pull request whose branch was "
+                   "force-pushed.")
+DISAGREE = "If you think the review got it wrong, say so in a comment."
+MAINTAINER_CAN_REOPEN = "A maintainer can still reopen it if they'd like to take a look."
+
+
+def next_steps(url: str, left: int, closed: bool = True) -> str:
+    """What a contributor can do after a bounce, for the report and the state comment."""
+    if left <= 0:
+        return " ".join(["No review attempts left."] + ([MAINTAINER_CAN_REOPEN] if closed else []) + [DISAGREE])
+    if closed:
+        return (f"**To try again** ({plural(left, 'review attempt')} left): push your fixes as new commits, reopen this "
+                f"pull request, then run `gh bouncer {url}`. {DONT_FORCE_PUSH} {DISAGREE}")
+    return (f"**To try again** ({plural(left, 'review attempt')} left): push your fixes as new commits, then run "
+            f"`gh bouncer {url}`. {DISAGREE}")
+
+
+# What the state comment says, by situation (above the state block). {read} and {why} link the
+# review report when there is one.
+STATUS_TEXTS = {
+    "pass": "✅ **Passed.** Ready for a maintainer.{read}",
+    "kept_pass": "✅ **Passed** on an earlier commit. This project doesn't re-review later commits.{read}",
+    "fail_closed": "⛔ **Bounced** and closed.{why}\n\n{steps}",
+    "fail_open": "⛔ **Bounced.**{why} Left open for a maintainer to confirm.\n\n{steps}",
+    "expired": "No signed review arrived by the deadline ({deadline}), so this pull request was closed. "
+               "To try again, reopen it and run `gh bouncer {url}` ({left_text} left).",
+    "expired_last": "No signed review arrived by the deadline ({deadline}), so this pull request was closed. "
+                    f"It has no review attempts left. {MAINTAINER_CAN_REOPEN}",
+    "exhausted": "This pull request has no review attempts left (this project allows {allowed}), so it was "
+                 f"closed. {MAINTAINER_CAN_REOPEN}",
+    "exhausted_open": "This pull request has no review attempts left (this project allows {allowed}), so new "
+                      "commits aren't reviewed. Left open for a maintainer to decide.",
+    "reclosed": "This commit was already reviewed and bounced, so the pull request was closed again. Push your "
+                "fixes as new commits first, then reopen it and run `gh bouncer {url}`.",
+    "override": "A maintainer reopened this pull request, so the bounce no longer applies. The bouncer won't "
+                "review later commits either.",
+    "no_fork": "This pull request's fork was deleted, so it can't be reviewed or merged. Closing it. "
+               "To send this change again, open a new pull request from a fork.",
+    "draft": "This pull request is a draft. Once it's marked ready for review, the bouncer asks for a review here.",
+}
+
+
+def status_text(kind: str, report: str = "", **kw) -> str:
+    """A state comment text from STATUS_TEXTS, with the review report linked when there is one."""
+    read = f" [Read the review]({report})" if report else ""
+    why = f" [See why]({report})" if report else ""
+    return "### 🚪 Bouncer\n\n" + STATUS_TEXTS[kind].format(read=read, why=why, **kw)

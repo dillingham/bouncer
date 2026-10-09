@@ -21,8 +21,8 @@ from typing import Callable
 from . import config as config_mod
 from .common import MIN_REVIEW_PROTOCOL, PREDICATE_TYPE, GitHub, GitHubError, subject_name
 from .decide import brief, decide
-from .render import (STALE_NOTES, clean, find_state, fmt_deadline, instructions, parse_state, review_markdown,
-                     state_block)
+from .render import (STALE_NOTES, clean, find_state, fmt_deadline, instructions, next_steps, parse_state,
+                     plural, review_markdown, state_block, status_text)
 
 L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
 LABEL_COLORS = {L_PENDING: "fbca04", L_PASS: "0e8a16", L_FAIL: "b60205", L_SKIP: "c5def5"}
@@ -289,6 +289,9 @@ class Gate:
             return "config"  # made with other settings than the maintainers' current ones
         return None
 
+    def _url(self, n: int) -> str:
+        return f"{self.server}/{self.repo}/pull/{n}"
+
     def _gate_ref(self) -> str:
         if not self.action_ref:
             # Not run from a tagged download (e.g. a local path): the action's default branch.
@@ -365,10 +368,10 @@ class Gate:
             if self._is_maintainer(sender or ""):
                 state["status"] = "override"
                 self._release(pr, state)
-                self._save_state(n, sticky, "### 🚪 Bouncer\n\nReopened by a maintainer, so the bouncer verdict is set aside.", state)
+                self._save_state(n, sticky, status_text("override"), state)
                 self._set_labels(n, labels, None)
                 return "override"
-            self._comment(n, "### 🚪 Bouncer\n\nThis commit was already bounced. Push fixes, reopen, then run the review again.")
+            self._comment(n, status_text("reclosed", url=self._url(n)))
             self._close(n)
             return "reclosed"
 
@@ -378,7 +381,7 @@ class Gate:
         if state and state.get("status") == "override":
             if state.get("sha") != head_sha:
                 state["sha"] = head_sha
-                self._save_state(n, sticky, "### 🚪 Bouncer\n\nReopened by a maintainer, so the bouncer verdict is set aside.", state)
+                self._save_state(n, sticky, status_text("override"), state)
             return "override"
 
         # A PR that expired without a review gets a fresh round when it is reopened, even at the same commit.
@@ -391,7 +394,7 @@ class Gate:
             prev = state or {}
             if prev.get("status") == "pass" and not self.cfg.rereview_after_pass:
                 prev["sha"] = head_sha
-                self._save_state(n, sticky, "### 🚪 Bouncer\n\nAlready passed; later commits are not re-reviewed.", prev)
+                self._save_state(n, sticky, status_text("kept_pass", report=prev.get("report", "")), prev)
                 return "kept-pass"
             if not head_repo:
                 return self._no_fork(n, sticky, prev, labels, head_sha)
@@ -399,16 +402,15 @@ class Gate:
                 if not was_draft:
                     state = {"v": 1, "sha": head_sha, "status": "draft",
                              "rounds": int(prev.get("rounds", 0)), "fails": int(prev.get("fails", 0))}
-                    self._save_state(n, sticky, "### 🚪 Bouncer\n\nThis pull request is a draft. Once it's marked ready "
-                                     "for review, the bouncer asks for a review here.", state)
+                    self._save_state(n, sticky, status_text("draft"), state)
                     self._set_labels(n, labels, None)
                 self.log(f"#{n}: draft, waiting until it's ready for review")
                 return "draft"
             fails = int(prev.get("fails", 0))
             if fails >= self.cfg.max_attempts:
                 state = {**prev, "sha": head_sha, "status": "exhausted"}
-                closing = "Closing." if self.cfg.close_on_fail else "Left open for a maintainer to decide."
-                self._save_state(n, sticky, f"### 🚪 Bouncer\n\nThis pull request has used all {self.cfg.max_attempts} review rounds. {closing}", state)
+                self._save_state(n, sticky, status_text("exhausted" if self.cfg.close_on_fail else "exhausted_open",
+                                                        allowed=plural(self.cfg.max_attempts, "review attempt")), state)
                 self._set_labels(n, labels, L_FAIL)
                 if self.cfg.close_on_fail:
                     self._close(n)
@@ -487,8 +489,10 @@ class Gate:
         if expired:
             state["status"] = "expired"
             state["fails"] = int(state.get("fails", 0)) + 1
-            self._save_state(n, sticky, "### 🚪 Bouncer\n\nNo signed review arrived before the deadline. Closing. "
-                             "Reopen this pull request, then run `gh bouncer` with its URL.", state)
+            left = self.cfg.max_attempts - state["fails"]
+            self._save_state(n, sticky, status_text("expired" if left > 0 else "expired_last", url=self._url(n),
+                                                    deadline=fmt_deadline(self._deadline(state)),
+                                                    left_text=plural(left, "review attempt")), state)
             self._set_labels(n, labels, L_FAIL)
             self._close(n)
             self.log(f"#{n}: expired")
@@ -500,8 +504,7 @@ class Gate:
         or found for it. Only called for a new or pending round; a PR that already passed, or
         that a maintainer let through, is left alone."""
         state = {"v": 1, "rounds": 0, "fails": 0, **state, "sha": head_sha, "status": "no_fork"}
-        self._save_state(n, sticky, "### 🚪 Bouncer\n\nThe source repository of this pull request was deleted, "
-                         "so it can't be reviewed. Closing.", state)
+        self._save_state(n, sticky, status_text("no_fork"), state)
         self._set_labels(n, labels, None)
         self._close(n)
         self.log(f"#{n}: fork deleted")
@@ -547,31 +550,26 @@ class Gate:
     def _apply(self, pr: dict, labels: set[str], sticky: dict | None, state: dict, f: Found, attempts: int) -> str:
         n = int(pr["number"])
         d = decide(f.predicate, self.cfg)
-        report = review_markdown(f.predicate, d, self.cfg, self.server)
+        bounced = d.outcome != "pass"
+        fails = int(state.get("fails", 0)) + bounced
+        steps = next_steps(self._url(n), self.cfg.max_attempts - fails, self.cfg.close_on_fail) if bounced else ""
+        report = review_markdown(f.predicate, d, self.cfg, self.server, next_steps=steps)
         if attempts > 1:
             report += f"\n\n<sub>{attempts} reviews were run for this commit; only the first one counts.</sub>"
         state["report"] = self._comment(n, report).get("html_url", "")
-        state["status"] = d.outcome
-        state["run"] = f.run
+        state.update(status=d.outcome, run=f.run, fails=fails)
         state.pop("stale", None)
-        if d.reasons:
-            state["reasons"] = [brief(r) for r in d.reasons[:5]]
-        if d.outcome == "pass":
+        if not bounced:
             self._release(pr, state)
-            self._save_state(n, sticky, "### 🚪 Bouncer\n\n✅ Passed. Ready for a maintainer.", state)
+            self._save_state(n, sticky, status_text("pass", report=state["report"]), state)
             self._set_labels(n, labels, L_PASS)
         else:
-            state["fails"] = int(state.get("fails", 0)) + 1
-            left = self.cfg.max_attempts - state["fails"]
+            state["reasons"] = [brief(r) for r in d.reasons[:5]]
+            kind = "fail_closed" if self.cfg.close_on_fail else "fail_open"
+            self._save_state(n, sticky, status_text(kind, report=state["report"], steps=steps), state)
+            self._set_labels(n, labels, L_FAIL)
             if self.cfg.close_on_fail:
-                more = (f"Push fixes, reopen this pull request, then run `gh bouncer` again ({left} round{'s' if left != 1 else ''} left)."
-                        if left > 0 else "No review rounds left.")
-                self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ Bounced. {more}", state)
-                self._set_labels(n, labels, L_FAIL)
                 self._close(n)
-            else:
-                self._save_state(n, sticky, "### 🚪 Bouncer\n\n⛔ Bounced. Left open for a maintainer to confirm.", state)
-                self._set_labels(n, labels, L_FAIL)
         self.log(f"#{n}: {d.outcome}")
         return d.outcome
 
