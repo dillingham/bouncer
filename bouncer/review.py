@@ -183,8 +183,9 @@ def _waiting_for_review(gh: GitHub, upstream: str, pr: dict, sleep) -> bool:
 
     The gate reacts to the same push, at about the time this run starts, so it gets up to two
     minutes to catch up: its state comment then names this commit, and says whether a review is
-    pending. If it never does (no gate upstream, say), the labels decide: bouncer:pending, and
-    neither bouncer:skip nor bouncer:pass."""
+    pending. If it doesn't, the state for the earlier commit says whether the gate will ask for a
+    review of this one (see _next_round). With no state at all (no gate upstream, say), the labels
+    decide: bouncer:pending, and neither bouncer:skip nor bouncer:pass."""
     n, sha = pr["number"], pr["head"]["sha"]
     for attempt in range(13):
         labels = {lb.get("name") for lb in pr.get("labels") or []}
@@ -196,7 +197,32 @@ def _waiting_for_review(gh: GitHub, upstream: str, pr: dict, sleep) -> bool:
         if attempt < 12:
             sleep(10)
             pr = gh.get(f"/repos/{upstream}/pulls/{n}")
-    return L_PENDING in labels and not labels & {L_SKIP, L_PASS}
+    waiting = _next_round(gh, upstream, pr, state) if state.get("sha") else None
+    return waiting if waiting is not None else L_PENDING in labels and not labels & {L_SKIP, L_PASS}
+
+
+def _next_round(gh: GitHub, upstream: str, pr: dict, state: dict) -> bool | None:
+    """Whether the gate asks for a review of a new commit, going by its state for an earlier one
+    (None for a status this version doesn't know). The labels can't tell: they still describe
+    the earlier round, like bouncer:fail on a bounce left open, or bouncer:pass."""
+    status, left = state.get("status"), state.get("left")
+    if status in ("override", "exhausted", "wrong_base", "no_fork"):
+        return False
+    if status not in ("pending", "fail", "expired", "pass", "draft"):
+        return None
+    if pr.get("draft") and not state.get("drafted"):
+        return False  # the contributor's own draft: no review until it's marked ready
+    if status == "pass":
+        try:
+            text = config_mod.fetch_text(gh, upstream)
+        except GitHubError:
+            text = ""  # the default settings
+        try:
+            if not config_mod.parse(text).rereview_after_pass:
+                return False
+        except config_mod.ConfigError:
+            return False  # the gate stops at an invalid .bouncer.yml too
+    return not isinstance(left, int) or left > 0  # out of attempts, it isn't reviewed
 
 
 def _head_repo(pr: dict) -> str:

@@ -1255,11 +1255,12 @@ def test_action_identity_from_runner_path():
 # --- resolve: manual vs automatic runs -------------------------------------------
 class ResolveGH:
     """The fork me/repo of up/repo. `states` is what the gate's state comment says on each read
-    (None: no comment); by default the gate is waiting for a review of the PR's current head."""
+    (None: no comment); by default the gate is waiting for a review of the PR's current head.
+    `config` is up/repo's .bouncer.yml (None: there is none)."""
 
-    def __init__(self, prs, pr_by_number=None, fork=True, states=None):
+    def __init__(self, prs, pr_by_number=None, fork=True, states=None, config=None):
         self.prs, self.by_n, self.fork, self.calls = prs, pr_by_number or {}, fork, []
-        self.states, self.last = states, None
+        self.states, self.last, self.config = states, None, config
 
     def get(self, path, accept=None):
         self.calls.append(path)
@@ -1280,15 +1281,18 @@ class ResolveGH:
         return [{"id": 1, "user": {"login": "github-actions[bot]"}, "body": body}], {}
 
     def get_or_none(self, path, accept=None):
+        if path == "/repos/up/repo/contents/.bouncer.yml":
+            self.calls.append(path)
+            return self.config
         try:
             return self.get(path)
         except KeyError:
             return None
 
 
-def _pr(n=3, sha="s1", state="open", head="me/repo", labels=()):
+def _pr(n=3, sha="s1", state="open", head="me/repo", labels=(), draft=False):
     return {"number": n, "state": state, "head": {"sha": sha, "repo": {"full_name": head}}, "base": {"sha": "b"},
-            "labels": [{"name": x} for x in labels]}
+            "labels": [{"name": x} for x in labels], "draft": draft}
 
 
 def run_resolve(monkeypatch, tmp_path, gh, event, pr_arg="", key="k", sha="s1", ref="feature", upstream=""):
@@ -1385,3 +1389,34 @@ def test_push_reviews_only_what_the_bouncer_is_waiting_for(monkeypatch, tmp_path
     assert run(ResolveGH([_pr(sha="new")], {3: _pr(sha="new")}, states=list(stuck))) == {"skip": "true"}
     # a manual run always reviews
     assert run(ResolveGH([_pr(sha="new")], states=[{"sha": "new", "status": "pass"}]), "workflow_dispatch")["skip"] == "false"
+
+
+@pytest.mark.parametrize("before,labels,config,draft,reviewed", [
+    # bounced and left open (close_on_fail: false): the push is the next attempt
+    ({"status": "fail", "left": 2}, ["bouncer:fail"], None, False, True),
+    ({"status": "fail"}, ["bouncer:fail"], None, False, True),  # an older gate, without "left"
+    ({"status": "fail", "left": 0}, ["bouncer:fail"], None, False, False),  # out of attempts
+    # passed: reviewed again unless rereview_after_pass is off
+    ({"status": "pass", "left": 3}, ["bouncer:pass"], None, False, True),
+    ({"status": "pass", "left": 3}, ["bouncer:pass"], "gate: {rereview_after_pass: false}", False, False),
+    ({"status": "pass", "left": 3}, ["bouncer:pass"], "gate: [", False, False),  # invalid: the gate stops too
+    ({"status": "pending", "left": 3}, ["bouncer:pending"], None, False, True),
+    ({"status": "pending", "left": 3, "drafted": True}, ["bouncer:pending"], None, True, True),  # the gate's own draft
+    ({"status": "draft", "left": 3}, [], None, False, True),  # marked ready since
+    ({"status": "draft", "left": 3}, [], None, True, False),
+    ({"status": "override", "left": 2}, [], None, False, False),
+    ({"status": "exhausted", "left": 0}, ["bouncer:fail"], None, False, False),
+    ({"status": "quarantined"}, ["bouncer:pending"], None, False, True),  # unknown: the labels decide
+    ({"status": "quarantined"}, ["bouncer:fail"], None, False, False),
+])
+def test_push_reviewed_when_the_gate_lags(monkeypatch, tmp_path, before, labels, config, draft, reviewed):
+    # The gate's run for this push is queued for more than two minutes, so its state still names the
+    # earlier commit, and the labels still describe that round.
+    stuck = [{"sha": "old", **before}] * 13
+    pr = _pr(sha="new", labels=labels, draft=draft)
+    gh = ResolveGH([pr], {3: pr}, states=stuck, config=config)
+    out = run_resolve(monkeypatch, tmp_path, gh, "push", sha="new")[1]
+    assert out["skip"] == ("false" if reviewed else "true")
+    # the labels still win when a maintainer says skip
+    gh = ResolveGH([_pr(sha="new", labels=labels + ["bouncer:skip"])], states=list(stuck), config=config)
+    assert run_resolve(monkeypatch, tmp_path, gh, "push", sha="new")[1] == {"skip": "true"}

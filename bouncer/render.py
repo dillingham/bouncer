@@ -223,7 +223,8 @@ def instructions(pr: int, head_repo: str, upstream: str, deadline: str, attempts
         f"- The review uses {cfg.model} at {cfg.effort} effort, billed to your key. "
         "Your code is checked out read only and never run.",
         "- GitHub signs the result. Only the first review of each commit counts.",
-        "- Once your key is saved, every push to this pull request starts a new review automatically.",
+        "- Once your key is saved, a push to this pull request usually starts its review by itself, if the bouncer "
+        "asks for one. If this comment still asks for a review after that, run the command again.",
         "- No review by the deadline closes the pull request. You can reopen it and run the review then.",
         "",
         "</details>",
