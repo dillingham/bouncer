@@ -321,10 +321,6 @@ class Gate:
         self._persisted[n] = _snapshot(state)
         head_sha = pr["head"]["sha"]
         head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name", "")
-        if not head_repo:
-            self._comment(n, "### 🚪 Bouncer\n\nThe source repository of this pull request was deleted, so it can't be reviewed. Closing.")
-            self._close(n)
-            return "closed-no-fork"
 
         # Deterministic pre-check, before a review is asked for or looked at.
         base = (pr.get("base") or {}).get("ref", "")
@@ -363,6 +359,8 @@ class Gate:
                 prev["sha"] = head_sha
                 self._save_state(n, sticky, "### 🚪 Bouncer\n\nAlready passed; later commits are not re-reviewed.", prev)
                 return "kept-pass"
+            if not head_repo:
+                return self._no_fork(n, sticky, prev, labels, head_sha)
             fails = int(prev.get("fails", 0))
             if fails >= self.cfg.max_attempts:
                 state = {**prev, "sha": head_sha, "status": "exhausted"}
@@ -388,6 +386,8 @@ class Gate:
         if state.get("status") != "pending":
             return state.get("status", "")
 
+        if not head_repo:
+            return self._no_fork(n, sticky, state, labels, head_sha)
         try:
             found = self._signed_reviews(n, head_repo, head_sha)
         except VerifyError as e:
@@ -427,6 +427,18 @@ class Gate:
             self.log(f"#{n}: expired")
             return "expired"
         return "pending"
+
+    def _no_fork(self, n: int, sticky: dict | None, state: dict, labels: set[str], head_sha: str) -> str:
+        """Close a pull request whose fork was deleted while it needs a review: none can be run
+        or found for it. Only called for a new or pending round; a PR that already passed, or
+        that a maintainer let through, is left alone."""
+        state = {"v": 1, "rounds": 0, "fails": 0, **state, "sha": head_sha, "status": "no_fork"}
+        self._save_state(n, sticky, "### 🚪 Bouncer\n\nThe source repository of this pull request was deleted, "
+                         "so it can't be reviewed. Closing.", state)
+        self._set_labels(n, labels, None)
+        self._close(n)
+        self.log(f"#{n}: fork deleted")
+        return "closed-no-fork"
 
     def _signed_reviews(self, n: int, head_repo: str, head_sha: str) -> list[Found]:
         """Verified reviews of exactly this PR and commit, signed by the bouncer's review.yml from

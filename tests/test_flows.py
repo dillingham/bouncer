@@ -546,6 +546,30 @@ def test_one_failing_pr_does_not_stop_the_sweep():
     assert any(line.startswith("::warning::#1: TimeoutExpired") for line in logs)
 
 
+def no_fork(**kw):
+    pr = make_pr(**kw)
+    pr["head"]["repo"] = None  # the contributor deleted their fork
+    return pr
+
+
+def test_deleted_fork_closes_only_prs_that_need_a_review():
+    # passed, then the fork is deleted: left alone (e.g. on a later /bouncer check)
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    gate(gh, verifier=lambda r, s: [found("pass")]).process(make_pr())
+    assert gate(gh).process(no_fork()) == "pass" and 7 not in gh.closed
+    # waiting for a review: closed, once
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    assert gate(gh, verifier=no_review_lookup).process(no_fork()) == "closed-no-fork"
+    assert 7 in gh.closed and gh.state(7)["status"] == "no_fork" and "bouncer:pending" not in gh.labels[7]
+    bodies = gh.bodies(7)
+    assert gate(gh).process(no_fork()) == "no_fork" and gh.bodies(7) == bodies
+    # a new pull request from a fork that's already gone
+    gh = FakeGitHub()
+    assert gate(gh).process(no_fork(), action="opened") == "closed-no-fork" and 7 in gh.closed
+
+
 def test_exempt_authors_untouched():
     gh = FakeGitHub()
     assert gate(gh).process(make_pr(n=1, assoc="MEMBER")) == "exempt"
