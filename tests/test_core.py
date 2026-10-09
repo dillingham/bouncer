@@ -1,5 +1,6 @@
 import base64
 import copy
+import datetime as dt
 import json
 import shutil
 import subprocess
@@ -97,6 +98,40 @@ def test_subject_is_deterministic_and_normalized():
 def test_linked_issues():
     body = "Fixes #12. Also closes org/repo#7, resolves https://github.com/org/repo/issues/9 and mentions #3. fixes other/x#5"
     assert linked_issue_numbers(body, "org/repo") == [12, 7, 9]
+
+
+class FactsGH:
+    """Enough GitHub for facts.gather(): one changed file, the given closing references, issues 1-9 open."""
+
+    def __init__(self, nodes=(), files=None):
+        self.nodes, self.files = list(nodes), files
+
+    def paginate(self, path, limit=1000):
+        return self.files or [{"filename": "src/a.py", "status": "modified", "additions": 1, "deletions": 1}]
+
+    def graphql(self, q, v):
+        return {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": self.nodes}}}}
+
+    def get_or_none(self, path, accept=None):
+        if path.startswith("/repos/up/repo/issues/"):
+            return {"number": int(path.rsplit("/", 1)[1]), "state": "open", "title": "upstream issue"}
+        return {}
+
+    def get(self, path, accept=None):
+        return {"total_count": 0}
+
+
+def gather(gh, body="", now=dt.datetime(2026, 10, 9, tzinfo=dt.timezone.utc)):
+    from bouncer.facts import gather as real_gather
+    return real_gather(gh, "up/repo", {"number": 9, "user": {"login": "x"}, "body": body}, now=now)
+
+
+def test_cross_repo_closing_reference_is_not_an_upstream_issue():
+    # GitHub links "Fixes other/lib#5" as a closing reference; #5 upstream is something else entirely.
+    nodes = [{"number": 5, "repository": {"nameWithOwner": "other/lib"}}, {"number": 6},
+             {"number": 7, "repository": {"nameWithOwner": "Up/Repo"}}]
+    facts = gather(FactsGH(nodes), "Fixes other/lib#5")
+    assert [i["number"] for i in facts["linked_issues"]] == [7]
 
 
 def test_clean_neutralizes():

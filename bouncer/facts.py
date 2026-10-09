@@ -34,12 +34,15 @@ def linked_issue_numbers(body: str, upstream: str) -> list[int]:
 def _closing_refs_graphql(gh: GitHub, upstream: str, pr: int) -> list[int]:
     owner, name = upstream.split("/", 1)
     q = """query($o:String!,$n:String!,$pr:Int!){repository(owner:$o,name:$n){
-      pullRequest(number:$pr){closingIssuesReferences(first:10){nodes{number}}}}}"""
+      pullRequest(number:$pr){closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}}}}"""
     try:
         data = gh.graphql(q, {"o": owner, "n": name, "pr": pr})
         nodes = data["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
-        return [int(n["number"]) for n in nodes]
-    except (GitHubError, KeyError, TypeError):
+        # GitHub also links issues in other repositories ("Fixes other/lib#5"). Their numbers mean
+        # nothing upstream, so only the upstream repository's own issues count.
+        return [int(n["number"]) for n in nodes
+                if str((n.get("repository") or {}).get("nameWithOwner") or "").lower() == upstream.lower()]
+    except (GitHubError, KeyError, TypeError, ValueError):
         return []
 
 
