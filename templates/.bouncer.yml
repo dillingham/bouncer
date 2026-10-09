@@ -21,6 +21,7 @@ gate:
   # pin_review_to_gate_version: true   # only accept reviews from the exact same bouncer commit
 
 checks:                         # deterministic, no AI involved
+  target_branches: []           # base branches outside PRs may target; [] = the default branch only
   require_linked_issue: true
   max_changed_lines: 0          # 0 = no limit
   max_author_prs_24h: 0         # 0 = no limit; PRs the author opened across GitHub in 24h

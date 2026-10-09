@@ -20,7 +20,7 @@ from typing import Callable
 from . import config as config_mod
 from .common import PREDICATE_TYPE, GitHub, GitHubError, subject_name
 from .decide import decide
-from .render import instructions, parse_state, review_markdown, state_block
+from .render import clean, instructions, parse_state, review_markdown, state_block
 
 L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
 LABEL_COLORS = {L_PENDING: "fbca04", L_PASS: "0e8a16", L_FAIL: "b60205", L_SKIP: "c5def5"}
@@ -189,6 +189,13 @@ class Gate:
             return "branch in this repository"
         return None
 
+    def _target_branches(self, pr: dict) -> list[str]:
+        """Base branches outside pull requests may target: checks.target_branches, else the default branch."""
+        if self.cfg.target_branches:
+            return self.cfg.target_branches
+        default = ((pr.get("base") or {}).get("repo") or {}).get("default_branch")
+        return [default or self.gh.get(f"/repos/{self.repo}")["default_branch"]]
+
     def _deadline(self, state: dict) -> dt.datetime:
         return _parse_time(state["requested_at"]) + dt.timedelta(hours=self.cfg.deadline_hours)
 
@@ -215,6 +222,12 @@ class Gate:
             self._close(n)
             return "closed-no-fork"
 
+        # Deterministic pre-check, before a review is asked for or looked at.
+        base = (pr.get("base") or {}).get("ref", "")
+        allowed = self._target_branches(pr)
+        if base not in allowed:
+            return self._wrong_base(pr, labels, sticky, state, base, allowed)
+
         # Reopened by someone after a bounce, at the same commit.
         if state and state.get("sha") == head_sha and action == "reopened" and state.get("status") in ("fail", "exhausted"):
             if self._is_maintainer(sender or ""):
@@ -229,7 +242,9 @@ class Gate:
 
         # A PR that expired without a review gets a fresh round when it is reopened, even at the same commit.
         retry_expired = bool(state) and action == "reopened" and state.get("status") == "expired"
-        if state is None or state.get("sha") != head_sha or retry_expired:
+        # So does one that was bounced for its base branch, once it targets an allowed one.
+        retarget = bool(state) and state.get("status") == "wrong_base"
+        if state is None or state.get("sha") != head_sha or retry_expired or retarget:
             prev = state or {}
             if prev.get("status") in ("pass", "override") and not self.cfg.rereview_after_pass:
                 prev["sha"] = head_sha
@@ -285,6 +300,29 @@ class Gate:
             return "expired"
         self.log(f"#{n}: waiting for review")
         return "pending"
+
+    def _wrong_base(self, pr: dict, labels: set[str], sticky: dict | None, state: dict | None,
+                    base: str, allowed: list[str]) -> str:
+        """Bounce a PR into a branch outside checks.target_branches. No review is involved, so
+        no round is used up."""
+        n, head_sha = int(pr["number"]), pr["head"]["sha"]
+        # Explain once per commit and base branch; later events only keep it bounced.
+        told = bool(state) and state.get("status") == "wrong_base" and state.get("sha") == head_sha and state.get("base") == base
+        if not told:
+            names = ", ".join(f"`{b}`" for b in allowed)
+            target = f"into {names}" if len(allowed) == 1 else f"into one of {names}"
+            fix = ("Open a new pull request against the right branch (a closed pull request's base can't be changed)."
+                   if self.cfg.close_on_fail else "Change the base branch, then comment `/bouncer check`.")
+            prev = state or {}
+            state = {"v": 1, "sha": head_sha, "status": "wrong_base", "base": base,
+                     "rounds": int(prev.get("rounds", 0)), "fails": int(prev.get("fails", 0))}
+            self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ Bounced: this pull request targets `{clean(base, 200)}`, "
+                             f"but this project only takes outside pull requests {target}. {fix}", state)
+        self._set_labels(n, labels, L_FAIL)
+        if self.cfg.close_on_fail:
+            self._close(n)
+        self.log(f"#{n}: targets {base}, not {', '.join(allowed)}")
+        return "wrong-base"
 
     def _apply(self, pr: dict, labels: set[str], sticky: dict | None, state: dict, f: Found, attempts: int) -> str:
         n = int(pr["number"])

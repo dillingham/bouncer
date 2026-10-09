@@ -158,10 +158,11 @@ class FakeGitHub:
 T0 = dt.datetime(2026, 10, 9, 12, 0, tzinfo=dt.timezone.utc)
 
 
-def make_pr(n=7, sha="a" * 40, assoc="NONE", labels=(), draft=False, author="drive-by"):
+def make_pr(n=7, sha="a" * 40, assoc="NONE", labels=(), draft=False, author="drive-by", base="main"):
     return {"number": n, "state": "open", "node_id": "PR_x", "draft": draft, "author_association": assoc,
             "user": {"login": author}, "labels": [{"name": x} for x in labels],
-            "head": {"sha": sha, "repo": {"full_name": "fork/repo"}}}
+            "head": {"sha": sha, "repo": {"full_name": "fork/repo"}},
+            "base": {"ref": base, "repo": {"full_name": "up/repo", "default_branch": "main"}}}
 
 
 def found(outcome, sha="a" * 40, n=7, ts=1):
@@ -244,6 +245,52 @@ def test_new_commit_after_fail_starts_new_round_until_exhausted():
     assert gh.state(7)["rounds"] == 2
     gate(gh, verifier=lambda r, s: [found("fail", sha="d" * 40)], cfg_text=cfg).process(make_pr(sha="d" * 40))
     assert gate(gh, cfg_text=cfg).process(make_pr(sha="e" * 40), action="reopened", sender="drive-by") == "exhausted"
+
+
+def no_review_lookup(head_repo, name):
+    raise AssertionError("looked for a review")
+
+
+def test_wrong_base_branch_bounced_before_review():
+    gh = FakeGitHub()
+    assert gate(gh, verifier=no_review_lookup).process(make_pr(base="dev"), action="opened") == "wrong-base"
+    assert 7 in gh.closed and gh.labels[7] == {"bouncer:fail"}
+    body = gh.bodies(7)[0]
+    assert "targets `dev`" in body and "into `main`" in body and "gh bouncer" not in body
+    st = gh.state(7)
+    assert st["status"] == "wrong_base" and st["fails"] == 0  # no review, no round used
+    # reopened without fixing it: closed again, explained only once
+    gh.closed.clear()
+    assert gate(gh, verifier=no_review_lookup).process(make_pr(base="dev"), action="reopened", sender="drive-by") == "wrong-base"
+    assert 7 in gh.closed and gh.bodies(7) == [body]
+
+
+def test_target_branches_allows_listed_branches():
+    cfg = "checks: {target_branches: [main, dev]}"
+    assert gate(FakeGitHub(), cfg_text=cfg).process(make_pr(base="dev"), action="opened") == "pending"
+    gh = FakeGitHub()
+    assert gate(gh, cfg_text=cfg).process(make_pr(base="release"), action="opened") == "wrong-base"
+    assert "into one of `main`, `dev`" in gh.bodies(7)[0]
+
+
+def test_default_branch_looked_up_when_payload_lacks_it():
+    gh = FakeGitHub()
+    gh.get = lambda path, accept=None: {"default_branch": "trunk"} if path == "/repos/up/repo" else None
+    pr = make_pr(base="trunk")
+    del pr["base"]["repo"]
+    assert gate(gh).process(pr, action="opened") == "pending"
+
+
+def test_retargeted_pr_gets_a_review_round():
+    gh = FakeGitHub()
+    cfg = "gate: {close_on_fail: false}"
+    assert gate(gh, cfg_text=cfg).process(make_pr(base="dev"), action="opened") == "wrong-base"
+    assert 7 not in gh.closed and "/bouncer check" in gh.bodies(7)[0]
+    # base changed to main, then /bouncer check
+    assert gate(gh, cfg_text=cfg).process(make_pr(labels=["bouncer:fail"])) == "pending"
+    st = gh.state(7)
+    assert st["status"] == "pending" and st["rounds"] == 1 and st["fails"] == 0
+    assert gh.labels[7] == {"bouncer:pending"} and "gh bouncer" in gh.bodies(7)[0]
 
 
 def test_forged_state_comment_ignored():

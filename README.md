@@ -10,7 +10,7 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
 
 ## How it works
 
-1. **Someone outside the team opens a PR.** The gate (in the maintainer's repo) labels it `bouncer:pending`, converts it to a draft, and comments with instructions and a deadline.
+1. **Someone outside the team opens a PR.** The gate (in the maintainer's repo) labels it `bouncer:pending`, converts it to a draft, and comments with instructions and a deadline. A PR into a branch outside `checks.target_branches` (default: only the default branch) is bounced right away, without a review.
 2. **The contributor runs `gh bouncer <pr-url>`.** It sets up their fork and stores their key as a fork secret the first time, then runs the review there. The review:
    - reads `.bouncer.yml` from the upstream base branch (model, effort, rules: all maintainer-controlled),
    - checks out the base branch and the PR head **read-only** (PR code is never executed),

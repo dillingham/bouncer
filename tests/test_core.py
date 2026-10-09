@@ -35,11 +35,19 @@ def test_defaults_and_template_parse():
     "rules: [{id: a, description: x}, {id: a, description: y}]",
     "gate: {fail_confidence: 2}",
     "gate: {max_attempts: true}",
+    "checks: {target_branches: main}",
+    "checks: {target_branches: [main, '']}",
+    "checks: {target_branches: [1.0]}",
     "- just a list",
 ])
 def test_config_rejects(text):
     with pytest.raises(config.ConfigError):
         config.parse(text)
+
+
+def test_target_branches():
+    assert config.parse("").target_branches == []  # = the default branch only
+    assert config.parse("checks: {target_branches: [main, ' release/2.x ']}").target_branches == ["main", "release/2.x"]
 
 
 def test_effort_sets_turn_default():

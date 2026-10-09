@@ -87,6 +87,8 @@ class Config:
     exempt_prior_contributors: bool = False
     exempt_maintainers: bool = True
     rereview_after_pass: bool = True
+    # Base branches outside pull requests may target. Empty = the repository's default branch only.
+    target_branches: list[str] = field(default_factory=list)
     require_linked_issue: bool = True
     max_changed_lines: int = 0
     max_author_prs_24h: int = 0
@@ -160,6 +162,10 @@ def parse(text: str | None) -> Config:
     if not 0.0 <= cfg.fail_confidence <= 1.0:
         raise ConfigError("gate.fail_confidence must be between 0 and 1")
 
+    branches = _get(checks, "target_branches", list, cfg.target_branches)
+    if not all(isinstance(b, str) and b.strip() for b in branches):
+        raise ConfigError("checks.target_branches must be a list of branch names")
+    cfg.target_branches = [b.strip() for b in branches]
     cfg.require_linked_issue = _get(checks, "require_linked_issue", bool, cfg.require_linked_issue)
     cfg.max_changed_lines = _get(checks, "max_changed_lines", int, cfg.max_changed_lines)
     cfg.max_author_prs_24h = _get(checks, "max_author_prs_24h", int, cfg.max_author_prs_24h)
