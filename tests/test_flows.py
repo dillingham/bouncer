@@ -671,6 +671,9 @@ def test_contributor_draft_waits_until_ready():
     assert gate(gh, now=later).process(make_pr(draft=True)) == "draft"
     assert gate(gh, now=later).process(make_pr(sha=B, draft=True), action="synchronize") == "draft"
     assert 7 not in gh.closed and len(gh.bodies(7)) == 1
+    # the state follows the head, so gh bouncer and the review on push see the new commit is a draft
+    st = gh.state(7)
+    assert st["status"] == "draft" and st["sha"] == B and st["rounds"] == 0 and gh.labels[7] == set()
     # marked ready: the round starts now, and the bouncer holds it as a draft until it passes
     gh.drafts[7] = False
     assert gate(gh, now=later).process(make_pr(sha=B), action="ready_for_review") == "pending"

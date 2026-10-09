@@ -481,6 +481,11 @@ class Gate:
                              "rounds": int(prev.get("rounds", 0)), "fails": int(prev.get("fails", 0))}
                     self._save_state(n, sticky, status_text("draft"), state)
                     self._set_labels(n, labels, None)
+                elif prev.get("sha") != head_sha:
+                    # Pushed to while it's a draft: the state names the new commit, so gh bouncer
+                    # and the review on push can tell this commit is a draft too.
+                    prev["sha"] = head_sha
+                    self._save_state(n, sticky, status_text("draft"), prev)
                 self.log(f"#{n}: draft, waiting until it's ready for review")
                 return "draft"
             fails = int(prev.get("fails", 0))
