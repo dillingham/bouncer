@@ -1,13 +1,16 @@
 """Small shared pieces: the attestation subject, untrusted fences, path globs, GitHub REST client."""
 from __future__ import annotations
 
+import functools
 import hashlib
 import html
 import http.client
 import json
 import os
 import re
+import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,14 +45,26 @@ def subject_digest(name: str) -> str:
     return hashlib.sha256(name.encode()).hexdigest()
 
 
+@functools.cache
+def _closing_tag() -> re.Pattern:
+    """The < of a closing </untrusted> tag, also with spaces or Unicode format characters
+    (zero-width space, soft hyphen, BOM, bidi controls...) anywhere in it: a tokenizer may drop
+    those, or the model may not see them, and then the tag reads as a real one."""
+    fmt = re.escape("".join(chr(c) for c in range(sys.maxunicode + 1) if unicodedata.category(chr(c)) == "Cf"))
+    gap, hidden = f"[\\s{fmt}]*", f"[{fmt}]*"
+    return re.compile(f"<(?={gap}/{gap}{hidden.join('untrusted')})", re.IGNORECASE)
+
+
 def untrusted(text: str, **attrs: str) -> str:
     """Fence text from outside the maintainer team as data for the model:
     <untrusted source="head:src/a.py">...</untrusted>.
 
     A closing tag inside the text is escaped, so the text can't end the fence early and pass
-    off what follows as trusted. Attribute values (paths chosen by the model) are escaped too.
+    off what follows as trusted. The text is otherwise kept as it is, invisible characters
+    included (a reviewer should see bidi tricks, say). Attribute values (paths chosen by the
+    model) are escaped too.
     """
-    body = re.sub(r"<(?=\s*/\s*untrusted)", "&lt;", text, flags=re.IGNORECASE)
+    body = _closing_tag().sub("&lt;", text)
     attr = "".join(f' {k}="{html.escape(str(v), quote=True)}"' for k, v in attrs.items())
     return f"<untrusted{attr}>\n{body}\n</untrusted>"
 
