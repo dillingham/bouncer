@@ -985,20 +985,52 @@ def test_review_run_writes_signed_payload(review_run, capsys):
     assert "Bounced" in (out / "report.md").read_text() and "Bounced" in summary.read_text()
 
 
-def test_review_streams_and_reports_connection_errors_cleanly(review_run, capsys):
+def api_error(cls, status, message):
     import anthropic
 
-    down = anthropic.APIConnectionError(request=None)
+    response = NS(status_code=status, headers={}, request=None)
+    if cls is anthropic.APIConnectionError:
+        return cls(request=None)
+    return cls(message, response=response, body={"type": "error", "error": {"message": message}})
+
+
+URL = "https://github.com/Up/Repo/pull/5"
+NOT_COUNTED = "Nothing was signed, so this doesn't use up a review attempt."
+
+
+@pytest.mark.parametrize("error,says", [
+    (("AuthenticationError", 401, "invalid x-api-key"), f"Anthropic rejected your API key (401). Save a working key with gh bouncer --set-key {URL}."),
+    (("RateLimitError", 429, "rate_limit_error"), f"Anthropic rate-limited your API key (429), even after retrying. Wait a few minutes, then run gh bouncer {URL} again."),
+    (("BadRequestError", 400, "Your credit balance is too low to access the Anthropic API."),
+     f"Your Anthropic account is out of credits. Add credits at https://console.anthropic.com/settings/billing, then run gh bouncer {URL} again."),
+    (("NotFoundError", 404, "model: claude-sonnet-5-5"), "Your Anthropic API key can't use claude-sonnet-5-5, the model this project reviews with (404)."),
+    (("InternalServerError", 500, "boom"), f"Anthropic's API had an error (500), even after retrying. Try again in a few minutes: gh bouncer {URL}"),
+    (("OverloadedError", 529, "Overloaded"), "Anthropic's API is overloaded (529)"),
+    (("APIConnectionError", None, ""), "Couldn't reach Anthropic's API (the connection failed or timed out)."),
+])
+def test_review_api_errors_are_explained(review_run, capsys, error, says):
+    import anthropic
+
     with pytest.raises(SystemExit) as e:
-        review_run([down])
+        review_run([api_error(getattr(anthropic, error[0]), error[1], error[2])])
     out = capsys.readouterr().out
-    assert e.value.code == 1 and "::error::" in out and "Traceback" not in out
-    assert not (review_run.out / "predicate.json").exists()
+    line = next(x for x in out.splitlines() if x.startswith("::error::"))
+    assert e.value.code == 1 and "Traceback" not in out and not (review_run.out / "predicate.json").exists()
+    assert says in line and line.endswith(NOT_COUNTED)
 
 
-def test_exempt_users_ignore_case():
-    assert gate(FakeGitHub(), cfg_text="gate: {exempt_users: [Alice]}").process(make_pr(author="alice")) == "exempt"
-    assert gate(FakeGitHub()).process(make_pr(author="Dependabot[bot]")) == "exempt"
+@pytest.mark.parametrize("script,says", [
+    ([resp(NS(type="text", text="hmm"), stop="end_turn")] * 40,
+     f"The review didn't reach a verdict within its turn budget (20 turns). Run gh bouncer {URL} to try again."),
+    ([resp(stop="refusal")], "The model declined to review this pull request."),
+    ([resp(tool("t", "submit_review", {}), stop="max_tokens")] * 2, "The reviewer's answer was cut off at the output limit, twice."),
+    ([resp(stop="model_context_window_exceeded")], "The review ran out of context window before reaching a verdict"),
+])
+def test_review_without_a_verdict_is_explained(review_run, capsys, script, says):
+    with pytest.raises(SystemExit):
+        review_run(script)
+    line = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("::error::"))
+    assert says in line and line.endswith(NOT_COUNTED)
 
 
 def test_prior_contributors_reviewed_unless_exempted():

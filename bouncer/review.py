@@ -44,8 +44,54 @@ def _out(**kv) -> None:
 
 
 def fail(msg: str) -> None:
-    print(f"::error::{msg}")
+    """Stop the run with an error annotation (`gh bouncer` shows the first one it finds)."""
+    print("::error::" + msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     sys.exit(1)
+
+
+# Said after every error before the signing step: a review that failed costs no attempt.
+NOTHING_SIGNED = "Nothing was signed, so this doesn't use up a review attempt."
+
+
+def review_failed_message(e: ReviewFailed, url: str, max_turns: int) -> str:
+    """Why the review ended without a verdict, and what to do about it."""
+    return {
+        "turns": f"The review didn't reach a verdict within its turn budget ({max_turns} turns). "
+                 f"Run gh bouncer {url} to try again. If it keeps happening, let the maintainers know.",
+        "refusal": "The model declined to review this pull request. If you think that's a mistake, let the maintainers know.",
+        "cut_off": f"The reviewer's answer was cut off at the output limit, twice. Run gh bouncer {url} to try again.",
+        "context": "The review ran out of context window before reaching a verdict; this pull request may be too "
+                   "large to review. Let the maintainers know.",
+    }.get(e.kind, f"The review failed: {e}.") + f" {NOTHING_SIGNED}"
+
+
+def api_error_message(e: Exception, url: str, model: str) -> str:
+    """An Anthropic API error, after the client's own retries, as something the contributor can act on."""
+    import anthropic
+
+    status = getattr(e, "status_code", None)
+    detail = " ".join(str(getattr(e, "message", "") or e).split())[:200]
+    if isinstance(e, anthropic.AuthenticationError):
+        msg = f"Anthropic rejected your API key (401). Save a working key with gh bouncer --set-key {url}."
+    elif isinstance(e, anthropic.PermissionDeniedError):
+        msg = (f"Your Anthropic API key isn't allowed to make this request (403): {detail} "
+               "Check the key at https://console.anthropic.com/settings/keys.")
+    elif isinstance(e, anthropic.RateLimitError):
+        msg = f"Anthropic rate-limited your API key (429), even after retrying. Wait a few minutes, then run gh bouncer {url} again."
+    elif isinstance(e, anthropic.BadRequestError) and "credit balance" in detail.lower():
+        msg = ("Your Anthropic account is out of credits. Add credits at https://console.anthropic.com/settings/billing, "
+               f"then run gh bouncer {url} again.")
+    elif isinstance(e, anthropic.NotFoundError):
+        msg = (f"Your Anthropic API key can't use {model}, the model this project reviews with (404). Check that "
+               f"your key's workspace has access to it, then run gh bouncer {url} again.")
+    elif isinstance(e, anthropic.APIStatusError) and status and status >= 500:
+        what = "is overloaded" if status == 529 else "had an error"
+        msg = f"Anthropic's API {what} ({status}), even after retrying. Try again in a few minutes: gh bouncer {url}"
+    elif isinstance(e, anthropic.APIStatusError):
+        msg = f"Anthropic's API refused the request ({status}): {detail}"
+    else:  # connection errors and timeouts
+        msg = f"Couldn't reach Anthropic's API (the connection failed or timed out). Try again in a few minutes: gh bouncer {url}"
+    return f"{msg} {NOTHING_SIGNED}"
 
 
 def skip(msg: str) -> None:
@@ -161,9 +207,14 @@ def cmd_run(args) -> None:
 
     gh = GitHub()
     upstream, pr_n = args.upstream, int(args.pr)
-    pr = gh.get(f"/repos/{upstream}/pulls/{pr_n}")
+    url = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{upstream}/pull/{pr_n}"
+    try:
+        pr = gh.get(f"/repos/{upstream}/pulls/{pr_n}")
+    except GitHubError as e:
+        fail(f"Couldn't read the pull request from GitHub ({e}). Try again in a few minutes: gh bouncer {url} {NOTHING_SIGNED}")
     if pr["head"]["sha"] != args.head_sha:
-        fail("The pull request changed while the review was starting. Run the workflow again.")
+        fail(f"The pull request got a new commit while the review was starting. Run gh bouncer {url} to review it. "
+             f"{NOTHING_SIGNED}")
 
     base_dir, head_dir = Path(args.base_dir), Path(args.head_dir)
     # The copy the gate reads (the default branch), not the PR's base checkout: the gate only
@@ -173,22 +224,25 @@ def cmd_run(args) -> None:
     try:
         cfg = config_mod.parse(cfg_text)
     except config_mod.ConfigError as e:
-        fail(f"The maintainers' .bouncer.yml is invalid: {e}")
+        fail(f"The maintainers' .bouncer.yml is invalid ({e}), so there's no review to run. Let them know. {NOTHING_SIGNED}")
     for w in cfg.warnings:
         print(f"::warning::The maintainers' .bouncer.yml: {w}")
 
     print(f"Reviewing {upstream}#{pr_n} at {args.head_sha[:12]} with {cfg.model} (effort {cfg.effort}, up to {cfg.max_turns} turns)")
-    facts = gather(gh, upstream, pr)
-    content = build_user_content(
-        cfg, upstream, pr, facts,
-        diff=_diff(gh, upstream, pr_n),
-        contributing=_find_contributing(base_dir),
-        issues_text=_issues_text(gh, upstream, facts["linked_issues"]),
-    )
+    try:
+        facts = gather(gh, upstream, pr)
+        content = build_user_content(
+            cfg, upstream, pr, facts,
+            diff=_diff(gh, upstream, pr_n),
+            contributing=_find_contributing(base_dir),
+            issues_text=_issues_text(gh, upstream, facts["linked_issues"]),
+        )
+    except GitHubError as e:
+        fail(f"Couldn't read the pull request from GitHub ({e}). Try again in a few minutes: gh bouncer {url} {NOTHING_SIGNED}")
 
     key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not key:
-        fail("ANTHROPIC_API_KEY is not set. Add it under Settings > Secrets and variables > Actions in your fork.")
+        fail(f"Your fork has no ANTHROPIC_API_KEY secret. Save one with gh bouncer --set-key {url}. {NOTHING_SIGNED}")
     # Base URL is pinned so nothing in the environment can redirect the review to another endpoint.
     client = anthropic.Anthropic(api_key=key, base_url="https://api.anthropic.com", max_retries=4, timeout=600)
     ws = Workspace({"base": base_dir, "head": head_dir})
@@ -196,13 +250,9 @@ def cmd_run(args) -> None:
     try:
         review = agent.run(SYSTEM, content, [r.id for r in cfg.rules])
     except ReviewFailed as e:
-        fail(str(e))
-    except anthropic.AuthenticationError:
-        fail("Anthropic rejected the API key. Check the ANTHROPIC_API_KEY secret in your fork.")
-    except anthropic.APIStatusError as e:
-        fail(f"Anthropic API error {e.status_code}: {str(e)[:300]}")
-    except anthropic.APIError as e:  # connection errors and timeouts, after the client's retries
-        fail(f"Couldn't reach the Anthropic API: {str(e)[:300]}")
+        fail(review_failed_message(e, url, cfg.max_turns))
+    except anthropic.APIError as e:  # status, connection and timeout errors, after the client's retries
+        fail(api_error_message(e, url, cfg.model))
     verify_evidence(review, ws)
 
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")

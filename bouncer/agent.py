@@ -203,7 +203,11 @@ class Usage:
 
 
 class ReviewFailed(RuntimeError):
-    pass
+    """The review ended without a verdict. kind: turns, refusal, cut_off or context."""
+
+    def __init__(self, message: str, kind: str):
+        super().__init__(message)
+        self.kind = kind
 
 
 class Agent:
@@ -313,14 +317,14 @@ class Agent:
         nudged = reasked = cut_off = False
         while True:
             if self.usage.turns >= self.max_turns + 2:
-                raise ReviewFailed("the reviewer did not submit a verdict within the turn budget")
+                raise ReviewFailed("the reviewer did not submit a verdict within the turn budget", "turns")
             _trim_history(messages)
             _move_cache_breakpoint(messages)
             resp = self._create(system, messages)
             self.usage.turns += 1
             self.usage.add(resp.usage)
             if resp.stop_reason == "refusal":
-                raise ReviewFailed("the model declined to review this pull request")
+                raise ReviewFailed("the model declined to review this pull request", "refusal")
             if resp.stop_reason in ("max_tokens", "model_context_window_exceeded"):
                 # The answer was cut off, so a submit_review in it can be missing rules or end
                 # mid-reason. It is never accepted. Out of output tokens: drop it and ask once more,
@@ -330,9 +334,9 @@ class Agent:
                     _add_text(messages[-1], "Your previous answer was cut off at the output limit and was discarded. "
                                             "Answer again, more briefly.")
                     continue
-                raise ReviewFailed("the reviewer's answer was cut off at the output limit"
-                                   if resp.stop_reason == "max_tokens" else
-                                   "the review ran out of context window before reaching a verdict")
+                if resp.stop_reason == "max_tokens":
+                    raise ReviewFailed("the reviewer's answer was cut off at the output limit", "cut_off")
+                raise ReviewFailed("the review ran out of context window before reaching a verdict", "context")
             # Echo the assistant turn exactly as received (thinking blocks included).
             messages.append({"role": "assistant", "content": resp.content})
             tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
