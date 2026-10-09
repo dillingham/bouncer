@@ -81,6 +81,8 @@ The gate keeps one comment per pull request up to date (posted by `github-action
 | `model`, `effort` | string | the review settings in the current `.bouncer.yml` |
 | `note` | string | only while `pending`, when the latest signed review didn't count or couldn't be checked: `config_changed`, `outdated` or `verify_error` |
 
+See [SECURITY.md](SECURITY.md) for every known attack, how it's handled, what's still open, and the rules for future changes.
+
 ## Before trusting it on a busy repo
 
 These need a live run to confirm; none can be exercised offline:
