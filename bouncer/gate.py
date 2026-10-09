@@ -551,7 +551,7 @@ class Gate:
                      "rounds": int(prev.get("rounds", 0)), "fails": int(prev.get("fails", 0)),
                      "reasons": [brief(f"Pre-check: {why}")],
                      **({"drafted": True} if prev.get("drafted") else {})}
-            self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ Bounced: {why} {fix}", state)
+            self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ **Bounced:** {why} {fix}", state)
         self._set_labels(n, labels, L_FAIL)
         if self.cfg.close_on_fail:
             self._close(n)
