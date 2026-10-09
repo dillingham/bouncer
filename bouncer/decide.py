@@ -45,10 +45,11 @@ def rule_of(line: str) -> str | None:
 
 
 def brief(line: str, limit: int = 200) -> str:
-    """A reason as short plain text, for the state comment and the CLI: `rule-id: why`."""
+    """A reason as short plain text, for the state comment and the CLI: `rule-id: why`. One line,
+    without control characters (the CLI prints it in a terminal)."""
     m = _RULE_LINE.match(line)
     text = f"{m.group(1)}: {m.group(3)}" if m else line
-    text = " ".join(text.replace("`", "").split())
+    text = "".join(ch for ch in " ".join(text.replace("`", "").split()) if ch.isprintable())
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 

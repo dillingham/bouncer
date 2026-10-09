@@ -302,6 +302,7 @@ def test_decide_wording():
         "`has-tests` (Advisory): Unsure. r"]
     assert [brief(x) for x in d.reasons] == [d.reasons[0].replace("`", ""), "correct: r"]
     assert brief("`x` (Required, 90% confidence): " + "word " * 100).endswith("…")
+    assert brief("`x` (Required, 90% confidence): red \x1b[31mtext\x07\n here") == "x: red [31mtext here"
 
 
 def test_decide_deterministic_checks():
