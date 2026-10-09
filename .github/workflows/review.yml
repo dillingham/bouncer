@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
-      group: bouncer-review-${{ github.repository }}-${{ github.ref }}
+      group: bouncer-review-${{ github.repository }}-${{ inputs.pr || github.ref }}
       cancel-in-progress: true
     permissions:
       contents: read
