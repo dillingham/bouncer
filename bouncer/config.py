@@ -5,6 +5,7 @@ contributor cannot change the rules, the model or the effort level.
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import re
@@ -58,6 +59,17 @@ DEFAULT_RULES = [
     },
 ]
 
+# Every setting, by section ("" = top level). Anything else gets a warning: a typo would
+# otherwise silently fall back to the default.
+KNOWN = {
+    "": ("version", "review", "gate", "checks", "guidance", "rules"),
+    "review": ("model", "effort", "max_turns"),
+    "gate": ("deadline_hours", "max_attempts", "close_on_fail", "fail_confidence", "pin_review_to_gate_version",
+             "exempt_users", "exempt_prior_contributors", "exempt_maintainers", "rereview_after_pass"),
+    "checks": ("target_branches", "require_linked_issue", "max_changed_lines", "max_author_prs_24h", "forbidden_paths"),
+    "rules": ("id", "hard", "description"),
+}
+
 _RULE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 _MODEL = re.compile(r"^claude-[a-z0-9.-]{1,60}$")
 
@@ -96,6 +108,8 @@ class Config:
     forbidden_paths: list[str] = field(default_factory=lambda: [".github/**"])
     guidance: str = ""
     rules: list[Rule] = field(default_factory=lambda: [Rule(**r) for r in DEFAULT_RULES])
+    # Problems that don't stop the bouncer, such as unknown settings. Shown as warnings.
+    warnings: list[str] = field(default_factory=list)
 
     def rule(self, rule_id: str) -> Rule | None:
         return next((r for r in self.rules if r.id == rule_id), None)
@@ -134,10 +148,25 @@ def _get(d: dict, key: str, typ, default):
     return val
 
 
+def _unknown(section: str, d: dict) -> list[str]:
+    out = []
+    for key in d:
+        if key not in KNOWN[section]:
+            name = f"{section}.{key}" if section and section != "rules" else str(key)
+            near = difflib.get_close_matches(str(key), KNOWN[section], n=1)
+            out.append(f"unknown setting {name}, ignored" + (f" (did you mean {near[0]}?)" if near else ""))
+    return out
+
+
 def parse(text: str | None) -> Config:
     """Parse .bouncer.yml text. Missing file or empty text gives the defaults."""
     raw = text or ""
-    data = yaml.safe_load(raw) if raw.strip() else {}
+    try:
+        data = yaml.safe_load(raw) if raw.strip() else {}
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        where = f" (line {mark.line + 1}, column {mark.column + 1})" if mark else ""
+        raise ConfigError(f"not valid YAML: {getattr(e, 'problem', None) or e}{where}") from None
     if data is None:
         data = {}
     if not isinstance(data, dict):
@@ -154,6 +183,7 @@ def parse(text: str | None) -> Config:
             raise ConfigError(f"{name} must be a mapping")
 
     cfg = Config()
+    cfg.warnings = _unknown("", data) + _unknown("review", review) + _unknown("gate", gate) + _unknown("checks", checks)
     cfg.model = _get(review, "model", str, cfg.model)
     if not _MODEL.match(cfg.model):
         raise ConfigError(f"review.model does not look like a Claude model id: {cfg.model!r}")
@@ -171,7 +201,7 @@ def parse(text: str | None) -> Config:
     cfg.pin_review_to_gate_version = _get(
         gate, "pin_review_to_gate_version", bool, cfg.pin_review_to_gate_version
     )
-    cfg.exempt_users = [str(u) for u in _get(gate, "exempt_users", list, cfg.exempt_users)]
+    cfg.exempt_users = [str(u) for u in _get(gate, "exempt_users", list, cfg.exempt_users)]  # compared ignoring case
     cfg.exempt_prior_contributors = _get(
         gate, "exempt_prior_contributors", bool, cfg.exempt_prior_contributors
     )
@@ -189,6 +219,8 @@ def parse(text: str | None) -> Config:
     cfg.require_linked_issue = _get(checks, "require_linked_issue", bool, cfg.require_linked_issue)
     cfg.max_changed_lines = _get(checks, "max_changed_lines", int, cfg.max_changed_lines)
     cfg.max_author_prs_24h = _get(checks, "max_author_prs_24h", int, cfg.max_author_prs_24h)
+    if cfg.max_changed_lines < 0 or cfg.max_author_prs_24h < 0:
+        raise ConfigError("checks.max_changed_lines and checks.max_author_prs_24h must be 0 (no limit) or more")
     cfg.forbidden_paths = [str(p) for p in _get(checks, "forbidden_paths", list, cfg.forbidden_paths)]
 
     cfg.guidance = _get(data, "guidance", str, "").strip()[:8000]
@@ -201,6 +233,7 @@ def parse(text: str | None) -> Config:
         for i, r in enumerate(rules_raw):
             if not isinstance(r, dict):
                 raise ConfigError(f"rules[{i}] must be a mapping")
+            cfg.warnings += [f"rules[{i}]: {w}" for w in _unknown("rules", r)]
             rid = str(r.get("id", ""))
             if not _RULE_ID.match(rid):
                 raise ConfigError(f"rules[{i}].id must be lowercase letters, digits and dashes")

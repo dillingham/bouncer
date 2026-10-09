@@ -833,6 +833,11 @@ def test_review_streams_and_reports_connection_errors_cleanly(review_run, capsys
     assert not (review_run.out / "predicate.json").exists()
 
 
+def test_exempt_users_ignore_case():
+    assert gate(FakeGitHub(), cfg_text="gate: {exempt_users: [Alice]}").process(make_pr(author="alice")) == "exempt"
+    assert gate(FakeGitHub()).process(make_pr(author="Dependabot[bot]")) == "exempt"
+
+
 def test_prior_contributors_reviewed_unless_exempted():
     assert config.parse("").exempt_prior_contributors is False
     assert gate(FakeGitHub()).process(make_pr(assoc="CONTRIBUTOR"), action="opened") == "pending"

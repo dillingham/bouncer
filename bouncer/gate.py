@@ -245,7 +245,7 @@ class Gate:
         labels = {lb["name"] for lb in pr.get("labels", [])}
         if L_SKIP in labels:
             return "skip label"
-        if author in self.cfg.exempt_users:
+        if author.lower() in {u.lower() for u in self.cfg.exempt_users}:  # GitHub logins ignore case
             return "exempt user"
         if self.cfg.exempt_maintainers and assoc in TRUSTED_ASSOCIATIONS:
             return f"author is {assoc.lower()}"
@@ -609,6 +609,8 @@ def main() -> None:
     except config_mod.ConfigError as e:
         print(f"::error::.bouncer.yml is invalid: {e}")
         sys.exit(1)
+    for w in cfg.warnings:
+        print(f"::warning::.bouncer.yml: {w}")
     host = urllib.parse.urlparse(server).netloc
     signer = f"{host}/{bouncer_repo}/.github/workflows/review.yml"
     digest = None

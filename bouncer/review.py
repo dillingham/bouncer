@@ -174,6 +174,8 @@ def cmd_run(args) -> None:
         cfg = config_mod.parse(cfg_text)
     except config_mod.ConfigError as e:
         fail(f"The maintainers' .bouncer.yml is invalid: {e}")
+    for w in cfg.warnings:
+        print(f"::warning::The maintainers' .bouncer.yml: {w}")
 
     print(f"Reviewing {upstream}#{pr_n} at {args.head_sha[:12]} with {cfg.model} (effort {cfg.effort}, up to {cfg.max_turns} turns)")
     facts = gather(gh, upstream, pr)

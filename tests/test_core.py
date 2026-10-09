@@ -40,11 +40,25 @@ def test_defaults_and_template_parse():
     "checks: {target_branches: main}",
     "checks: {target_branches: [main, '']}",
     "checks: {target_branches: [1.0]}",
+    "checks: {max_changed_lines: -1}",
+    "checks: {max_author_prs_24h: -5}",
     "- just a list",
+    "rules: [\n",  # YAML syntax error
+    "a: b: c",
 ])
 def test_config_rejects(text):
     with pytest.raises(config.ConfigError):
         config.parse(text)
+
+
+def test_unknown_settings_warn():
+    cfg = config.parse("gate: {deadline_hour: 4}\nrules: [{id: a, description: x, hrad: false}]\nextra: 1\n")
+    assert cfg.deadline_hours == 48  # the typo falls back to the default, so it must be visible
+    assert cfg.warnings == ["unknown setting extra, ignored",
+                            "unknown setting gate.deadline_hour, ignored (did you mean deadline_hours?)",
+                            "rules[0]: unknown setting hrad, ignored (did you mean hard?)"]
+    assert config.parse((ROOT / "templates/.bouncer.yml").read_text()).warnings == []
+    assert cfg.digest == config.parse("rules: [{id: a, description: x}]").digest
 
 
 def test_target_branches():
