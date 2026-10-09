@@ -1,5 +1,7 @@
 # Bouncer review. Lives in your repository so every fork inherits it; it only runs in forks.
-# Contributors run it from their fork's Actions tab with their own ANTHROPIC_API_KEY secret.
+# Contributors run it from their fork with their own ANTHROPIC_API_KEY secret (or with
+# `gh bouncer <pr-url>`). Once the key is set, every push to an open PR's branch is reviewed
+# automatically; pushes with no open PR or no key exit quietly.
 # Copy unchanged. Use the same @ref as bouncer-gate.yml.
 name: Bouncer review
 
@@ -7,9 +9,10 @@ on:
   workflow_dispatch:
     inputs:
       pr:
-        description: Your pull request number in the upstream repository
-        required: true
-        type: number
+        description: Pull request number (leave empty to use the branch picked above)
+        required: false
+        type: string
+  push:
 
 permissions: {}
 
@@ -22,6 +25,6 @@ jobs:
       attestations: write
     uses: pr-bouncer/bouncer/.github/workflows/review.yml@v1
     with:
-      pr: ${{ inputs.pr }}
+      pr: ${{ inputs.pr || '' }}
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

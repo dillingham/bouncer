@@ -287,3 +287,87 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch):
 def test_maintainers_can_be_reviewed_when_exemption_off():
     gh = FakeGitHub()
     assert gate(gh, cfg_text="gate: {exempt_maintainers: false}").process(make_pr(assoc="OWNER"), action="opened") == "pending"
+
+
+def test_reopen_after_expiry_starts_new_round():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    gate(gh, now=T0 + dt.timedelta(hours=49)).process(make_pr())
+    later = T0 + dt.timedelta(hours=50)
+    assert gate(gh, now=later).process(make_pr(), action="reopened", sender="drive-by") == "pending"
+    st = gh.state(7)
+    assert st["rounds"] == 2 and st["fails"] == 1
+
+
+def test_instructions_offer_cli_and_direct_links():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    body = gh.bodies(7)[0]
+    assert "gh bouncer https://github.com/up/repo/pull/7" in body
+    assert "https://github.com/fork/repo/actions/workflows/bouncer-review.yml" in body
+    assert "https://github.com/fork/repo/settings/secrets/actions/new" in body
+
+
+# --- resolve: manual vs automatic runs -------------------------------------------
+class ResolveGH:
+    def __init__(self, prs, pr_by_number=None, fork=True):
+        self.prs, self.by_n, self.fork, self.calls = prs, pr_by_number or {}, fork, []
+
+    def get(self, path, accept=None):
+        self.calls.append(path)
+        if path == "/repos/me/repo":
+            return {"fork": self.fork, "parent": {"full_name": "up/repo"}}
+        if "/pulls?" in path:
+            return self.prs
+        n = int(path.rsplit("/", 1)[1])
+        return self.by_n[n].pop(0) if isinstance(self.by_n[n], list) else self.by_n[n]
+
+    def get_or_none(self, path, accept=None):
+        try:
+            return self.get(path)
+        except KeyError:
+            return None
+
+
+def _pr(n=3, sha="s1", state="open", head="me/repo"):
+    return {"number": n, "state": state, "head": {"sha": sha, "repo": {"full_name": head}}, "base": {"sha": "b"}}
+
+
+def run_resolve(monkeypatch, tmp_path, gh, event, pr_arg="", key="k", sha="s1", ref="feature"):
+    from bouncer import review as review_mod
+
+    monkeypatch.setattr(review_mod, "GitHub", lambda: gh)
+    out = tmp_path / "out"
+    out.write_text("")
+    for k, v in {"GITHUB_OUTPUT": str(out), "GITHUB_REPOSITORY": "me/repo", "GITHUB_EVENT_NAME": event,
+                 "ANTHROPIC_API_KEY": key, "GITHUB_SHA": sha, "GITHUB_REF_NAME": ref}.items():
+        monkeypatch.setenv(k, v)
+    code = 0
+    try:
+        review_mod.cmd_resolve(NS(pr=pr_arg), sleep=lambda s: None)
+    except SystemExit as e:
+        code = e.code
+    return code, dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+
+
+def test_resolve_push_without_key_or_pr_is_quiet(monkeypatch, tmp_path):
+    assert run_resolve(monkeypatch, tmp_path, ResolveGH([_pr()]), "push", key="") == (0, {"skip": "true"})
+    assert run_resolve(monkeypatch, tmp_path, ResolveGH([]), "push") == (0, {"skip": "true"})
+    # manual runs explain the problem instead
+    assert run_resolve(monkeypatch, tmp_path, ResolveGH([]), "workflow_dispatch")[0] == 1
+    assert run_resolve(monkeypatch, tmp_path, ResolveGH([_pr()]), "workflow_dispatch", key="")[0] == 1
+
+
+def test_resolve_finds_pr_from_branch(monkeypatch, tmp_path):
+    gh = ResolveGH([_pr(n=9)])
+    code, out = run_resolve(monkeypatch, tmp_path, gh, "workflow_dispatch")
+    assert code == 0 and out["pr"] == "9" and out["skip"] == "false" and out["upstream"] == "up/repo"
+    assert any("head=me:feature" in c for c in gh.calls)
+
+
+def test_resolve_push_waits_for_pr_to_catch_up(monkeypatch, tmp_path):
+    gh = ResolveGH([_pr(sha="old")], {3: [_pr(sha="old"), _pr(sha="new")]})
+    code, out = run_resolve(monkeypatch, tmp_path, gh, "push", sha="new")
+    assert code == 0 and out["head_sha"] == "new"
+    gh = ResolveGH([_pr(sha="old")], {3: _pr(sha="old")})
+    assert run_resolve(monkeypatch, tmp_path, gh, "push", sha="new")[1] == {"skip": "true"}

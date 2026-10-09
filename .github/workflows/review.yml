@@ -14,18 +14,22 @@ on:
   workflow_call:
     inputs:
       pr:
-        description: Pull request number in the upstream repository
-        required: true
-        type: number
+        description: Pull request number in the upstream repository. Empty = the open PR from this branch.
+        required: false
+        type: string
+        default: ""
     secrets:
       anthropic_api_key:
-        description: The contributor's Anthropic API key
-        required: true
+        description: The contributor's Anthropic API key. Without it, automatic runs exit quietly.
+        required: false
 
 jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    concurrency:
+      group: bouncer-review-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
     permissions:
       contents: read
       id-token: write
@@ -66,10 +70,12 @@ jobs:
         working-directory: .bouncer
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
           PR: ${{ inputs.pr }}
         run: python -m bouncer.review resolve --pr "$PR"
 
       - name: Check out upstream base branch (read only)
+        if: steps.pr.outputs.skip != 'true'
         uses: actions/checkout@v5
         with:
           repository: ${{ steps.pr.outputs.upstream }}
@@ -80,6 +86,7 @@ jobs:
           submodules: false
 
       - name: Check out pull request head (read only, never executed)
+        if: steps.pr.outputs.skip != 'true'
         uses: actions/checkout@v5
         with:
           repository: ${{ steps.pr.outputs.head_repo }}
@@ -90,13 +97,14 @@ jobs:
           submodules: false
 
       - name: Review
+        if: steps.pr.outputs.skip != 'true'
         id: review
         working-directory: .bouncer
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
           BOUNCER_SHA: ${{ steps.self.outputs.sha }}
-          PR: ${{ inputs.pr }}
+          PR: ${{ steps.pr.outputs.pr }}
           UPSTREAM: ${{ steps.pr.outputs.upstream }}
           HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
@@ -109,6 +117,7 @@ jobs:
           --out-dir "$GITHUB_WORKSPACE/out"
 
       - name: Sign the review
+        if: steps.pr.outputs.skip != 'true'
         uses: actions/attest@v4
         with:
           subject-name: ${{ steps.review.outputs.subject_name }}
@@ -117,8 +126,9 @@ jobs:
           predicate-path: out/predicate.json
 
       - name: Keep the report
+        if: steps.pr.outputs.skip != 'true'
         uses: actions/upload-artifact@v5
         with:
-          name: bouncer-review-${{ inputs.pr }}
+          name: bouncer-review-${{ steps.pr.outputs.pr }}
           path: out/
           retention-days: 30

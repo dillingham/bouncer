@@ -11,7 +11,7 @@ Contributor-paid pull request reviews for GitHub. An outside pull request doesn'
    - runs an agent that reads the touched files in full, greps for callers and APIs, checks existing tests, searches past issues and PRs for duplicates and declines, and evaluates every rule with file/line evidence,
    - verifies every piece of evidence against the actual files (quotes that don't match are discarded),
    - signs the report with a GitHub artifact attestation.
-3. **The gate verifies the signature** (on `/bouncer check` or every 30 minutes) and applies the verdict:
+3. **The gate verifies the signature** (every 10 minutes, or right away on `/bouncer check`) and applies the verdict:
    - **pass**: `bouncer:pass`, marked ready for review, report posted for the maintainer.
    - **fail**: report posted with reasons, `bouncer:fail`, PR closed. The contributor can push fixes and reopen for another round, up to `max_attempts`.
    - **no review by the deadline**: closed.
@@ -40,7 +40,12 @@ Members, collaborators, prior contributors (configurable), listed bots, and any 
 
 ## Contributor experience
 
-The gate's comment walks them through it: enable Actions in the fork, add `ANTHROPIC_API_KEY`, run **Bouncer review** with the PR number, then comment `/bouncer check`. The key stays a secret in their own fork. The report shows how many tokens their review used.
+The gate's comment gives them two ways in:
+
+- **Terminal:** `gh extension install pr-bouncer/gh-bouncer`, then `gh bouncer <pr-url>`. It turns on the review workflow in their fork, stores their key as a fork secret, runs the review and reports back on the PR.
+- **Browser:** add `ANTHROPIC_API_KEY` as a secret in their fork, then click **Run workflow** on their PR's branch. Direct links to both pages are in the comment.
+
+After the first run, every push to the PR branch is reviewed automatically. Pushes with no open PR, or forks without a key, exit quietly. The key stays a secret in their own fork, and the report shows how many tokens their review used.
 
 ## Before trusting it on a busy repo
 

@@ -11,6 +11,8 @@ import datetime as dt
 import json
 import os
 import sys
+import time
+import urllib.parse
 from pathlib import Path
 
 from . import config as config_mod
@@ -38,23 +40,68 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
-def cmd_resolve(args) -> None:
+def skip(msg: str) -> None:
+    print(f"::notice::{msg}")
+    _out(skip="true")
+    sys.exit(0)
+
+
+def cmd_resolve(args, sleep=time.sleep) -> None:
+    """Find the pull request to review.
+
+    Manual runs fail loudly with instructions. Automatic runs (on push) exit quietly
+    whenever there is nothing to do, so contributors never get failure emails from
+    pushes that have no open pull request or no key configured.
+    """
     gh = GitHub()
     me = os.environ["GITHUB_REPOSITORY"]
+    auto = os.environ.get("GITHUB_EVENT_NAME") == "push"
+    stop = skip if auto else fail
+
     repo = gh.get(f"/repos/{me}")
     parent = (repo.get("parent") or {}).get("full_name")
     if not repo.get("fork") or not parent:
-        fail(f"{me} is not a fork. Run this workflow from your fork of the project.")
-    pr = gh.get_or_none(f"/repos/{parent}/pulls/{args.pr}")
-    if not pr:
-        fail(f"Pull request #{args.pr} was not found in {parent}.")
+        stop(f"{me} is not a fork. Run this workflow from your fork of the project.")
+    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        stop("No ANTHROPIC_API_KEY secret in this fork. Add it under Settings > Secrets and variables > Actions "
+             "to run bouncer reviews.")
+
+    pr_arg = (args.pr or "").strip().lstrip("#")
+    branch = os.environ.get("GITHUB_REF_NAME", "")
+    if pr_arg:
+        if not pr_arg.isdigit():
+            fail(f"'{pr_arg}' is not a pull request number.")
+        pr = gh.get_or_none(f"/repos/{parent}/pulls/{pr_arg}")
+        if not pr:
+            fail(f"Pull request #{pr_arg} was not found in {parent}.")
+    else:
+        owner = me.split("/")[0]
+        head = urllib.parse.quote(f"{owner}:{branch}", safe=":")
+        prs = gh.get(f"/repos/{parent}/pulls?state=open&head={head}") or []
+        if not prs:
+            stop(f"No open pull request from {owner}:{branch} to {parent}. Pick your pull request's branch "
+                 "under 'Use workflow from', or enter the pull request number.")
+        pr = prs[0]
+    n = pr["number"]
     if pr["state"] != "open":
-        fail(f"{parent}#{args.pr} is {pr['state']}. Only open pull requests can be reviewed.")
+        stop(f"{parent}#{n} is {pr['state']}. Reopen it first, then run the review.")
     head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name", "")
     if head_repo.lower() != me.lower():
-        fail(f"{parent}#{args.pr} comes from {head_repo or 'a deleted repository'}, not {me}. "
+        stop(f"{parent}#{n} comes from {head_repo or 'a deleted repository'}, not {me}. "
              "Run the review from the fork the pull request was opened from.")
-    _out(upstream=parent, head_repo=me, base_sha=pr["base"]["sha"], head_sha=pr["head"]["sha"])
+
+    if auto:
+        # GitHub updates the pull request a few seconds after a push.
+        pushed = os.environ.get("GITHUB_SHA", "")
+        for _ in range(6):
+            if pr["head"]["sha"] == pushed:
+                break
+            sleep(10)
+            pr = gh.get(f"/repos/{parent}/pulls/{n}")
+        else:
+            skip(f"{parent}#{n} hasn't picked up commit {pushed[:12]} yet. Push again or run the review manually.")
+
+    _out(skip="false", pr=n, upstream=parent, head_repo=me, base_sha=pr["base"]["sha"], head_sha=pr["head"]["sha"])
 
 
 def _find_contributing(base: Path) -> str:
@@ -170,7 +217,7 @@ def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="bouncer.review")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("resolve")
-    r.add_argument("--pr", type=int, required=True)
+    r.add_argument("--pr", default="")
     x = sub.add_parser("run")
     for a in ("--pr", "--upstream", "--head-repo", "--base-sha", "--head-sha", "--base-dir", "--head-dir", "--out-dir"):
         x.add_argument(a, required=True)

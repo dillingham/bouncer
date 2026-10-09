@@ -216,18 +216,20 @@ class Gate:
             return "closed-no-fork"
 
         # Reopened by someone after a bounce, at the same commit.
-        if state and state.get("sha") == head_sha and action == "reopened" and state.get("status") in ("fail", "expired", "exhausted"):
+        if state and state.get("sha") == head_sha and action == "reopened" and state.get("status") in ("fail", "exhausted"):
             if self._is_maintainer(sender or ""):
                 state["status"] = "override"
                 self._save_state(n, sticky, "### 🚪 Bouncer\n\nReopened by a maintainer, so the bouncer verdict is set aside.", state)
                 self._set_labels(n, labels, None)
                 self._draft(pr, False)
                 return "override"
-            self._comment(n, "### 🚪 Bouncer\n\nThis commit was already bounced. Push changes and reopen to request a new review.")
+            self._comment(n, "### 🚪 Bouncer\n\nThis commit was already bounced. Push fixes, reopen, then run the review again.")
             self._close(n)
             return "reclosed"
 
-        if state is None or state.get("sha") != head_sha:
+        # A PR that expired without a review gets a fresh round when it is reopened, even at the same commit.
+        retry_expired = bool(state) and action == "reopened" and state.get("status") == "expired"
+        if state is None or state.get("sha") != head_sha or retry_expired:
             prev = state or {}
             if prev.get("status") in ("pass", "override") and not self.cfg.rereview_after_pass:
                 prev["sha"] = head_sha
@@ -276,7 +278,7 @@ class Gate:
             state["status"] = "expired"
             state["fails"] = int(state.get("fails", 0)) + 1
             self._save_state(n, sticky, "### 🚪 Bouncer\n\nNo signed review arrived before the deadline. Closing. "
-                             "Run the review in your fork, then reopen this pull request.", state)
+                             "Reopen this pull request, then run the review in your fork (`gh bouncer` or the Bouncer review workflow).", state)
             self._set_labels(n, labels, L_FAIL)
             self._close(n)
             self.log(f"#{n}: expired")
@@ -301,7 +303,7 @@ class Gate:
             state["fails"] = int(state.get("fails", 0)) + 1
             left = self.cfg.max_attempts - state["fails"]
             if self.cfg.close_on_fail:
-                more = (f"Push fixes and reopen this pull request for another review ({left} round{'s' if left != 1 else ''} left)."
+                more = (f"Push fixes, reopen this pull request, then run the review again ({left} round{'s' if left != 1 else ''} left)."
                         if left > 0 else "No review rounds left.")
                 self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ Bounced. {more}", state)
                 self._set_labels(n, labels, L_FAIL)
