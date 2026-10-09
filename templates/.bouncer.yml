@@ -14,6 +14,7 @@ gate:
   fail_confidence: 0.8          # a hard rule fails the PR only at or above this confidence
   rereview_after_pass: true     # new commits after a pass need a new review
   exempt_prior_contributors: true
+  exempt_maintainers: true      # false only for testing the bouncer on your own PRs
   exempt_users:
     - dependabot[bot]
     - renovate[bot]

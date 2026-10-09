@@ -84,6 +84,7 @@ class Config:
     pin_review_to_gate_version: bool = False
     exempt_users: list[str] = field(default_factory=lambda: ["dependabot[bot]", "renovate[bot]"])
     exempt_prior_contributors: bool = True
+    exempt_maintainers: bool = True
     rereview_after_pass: bool = True
     require_linked_issue: bool = True
     max_changed_lines: int = 0
@@ -151,6 +152,7 @@ def parse(text: str | None) -> Config:
     cfg.exempt_prior_contributors = _get(
         gate, "exempt_prior_contributors", bool, cfg.exempt_prior_contributors
     )
+    cfg.exempt_maintainers = _get(gate, "exempt_maintainers", bool, cfg.exempt_maintainers)
     cfg.rereview_after_pass = _get(gate, "rereview_after_pass", bool, cfg.rereview_after_pass)
     if cfg.deadline_hours < 1 or cfg.max_attempts < 1:
         raise ConfigError("gate.deadline_hours and gate.max_attempts must be at least 1")

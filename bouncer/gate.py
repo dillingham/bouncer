@@ -181,7 +181,7 @@ class Gate:
             return "skip label"
         if author in self.cfg.exempt_users:
             return "exempt user"
-        if assoc in TRUSTED_ASSOCIATIONS:
+        if self.cfg.exempt_maintainers and assoc in TRUSTED_ASSOCIATIONS:
             return f"author is {assoc.lower()}"
         if self.cfg.exempt_prior_contributors and assoc == "CONTRIBUTOR":
             return "prior contributor"

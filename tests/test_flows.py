@@ -282,3 +282,8 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch):
     assert outputs["subject_name"] == name and outputs["subject_digest"] == "sha256:" + subject_digest(name)
     assert outputs["verdict"] == "fail"
     assert "Bounced" in (out / "report.md").read_text()
+
+
+def test_maintainers_can_be_reviewed_when_exemption_off():
+    gh = FakeGitHub()
+    assert gate(gh, cfg_text="gate: {exempt_maintainers: false}").process(make_pr(assoc="OWNER"), action="opened") == "pending"
