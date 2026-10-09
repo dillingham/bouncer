@@ -113,7 +113,7 @@ jobs:
         with:
           subject-name: ${{ steps.review.outputs.subject_name }}
           subject-digest: ${{ steps.review.outputs.subject_digest }}
-          predicate-type: https://bounced.dev/attestation/review/v1
+          predicate-type: https://github.com/pr-bouncer/bouncer/attestation/review/v1
           predicate-path: out/predicate.json
 
       - name: Keep the report

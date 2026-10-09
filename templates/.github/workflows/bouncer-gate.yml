@@ -32,4 +32,4 @@ jobs:
       issues: write
       attestations: read
       id-token: write
-    uses: dillingham/bouncer/.github/workflows/gate.yml@v1
+    uses: pr-bouncer/bouncer/.github/workflows/gate.yml@v1

@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PREDICATE_TYPE = "https://bounced.dev/attestation/review/v1"
+PREDICATE_TYPE = "https://github.com/pr-bouncer/bouncer/attestation/review/v1"
 SCHEMA_VERSION = 1
 
 

@@ -20,7 +20,7 @@ Contributor-paid pull request reviews for GitHub. An outside pull request doesn'
 
 | Attempt | What stops it |
 |---|---|
-| Edit the review workflow in their fork | The gate only accepts attestations signed by `dillingham/bouncer/.github/workflows/review.yml`, so a modified workflow signs with the wrong identity. |
+| Edit the review workflow in their fork | The gate only accepts attestations signed by `pr-bouncer/bouncer/.github/workflows/review.yml`, so a modified workflow signs with the wrong identity. |
 | Run it on their own machine or a self-hosted runner | Verified with `--deny-self-hosted-runners`. |
 | Pick a cheap model, lower effort, or soften the rules | Model, effort and rules come from the upstream `.bouncer.yml`; the workflow has no inputs for them. |
 | Point the API at a fake endpoint | The base URL is hardcoded. |

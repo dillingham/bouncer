@@ -20,7 +20,7 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    uses: dillingham/bouncer/.github/workflows/review.yml@v1
+    uses: pr-bouncer/bouncer/.github/workflows/review.yml@v1
     with:
       pr: ${{ inputs.pr }}
     secrets:
