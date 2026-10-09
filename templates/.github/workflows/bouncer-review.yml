@@ -1,0 +1,27 @@
+# Bouncer review. Lives in your repository so every fork inherits it; it only runs in forks.
+# Contributors run it from their fork's Actions tab with their own ANTHROPIC_API_KEY secret.
+# Copy unchanged except OWNER below. Use the same @ref as bouncer-gate.yml.
+name: Bouncer review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Your pull request number in the upstream repository
+        required: true
+        type: number
+
+permissions: {}
+
+jobs:
+  review:
+    if: github.event.repository.fork
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: OWNER/bouncer/.github/workflows/review.yml@v1
+    with:
+      pr: ${{ inputs.pr }}
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

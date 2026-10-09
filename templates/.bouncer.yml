@@ -1,0 +1,54 @@
+# Bouncer settings. Read from your default branch; contributors can't change them.
+version: 1
+
+review:
+  # The model and effort decide how thorough (and how expensive for the contributor) a review is.
+  model: claude-opus-5-5
+  effort: high          # low | medium | high | xhigh | max
+  # max_turns: 35       # tool-use turns; defaults by effort
+
+gate:
+  deadline_hours: 48            # close if no signed review arrives in time
+  max_attempts: 3               # bounced review rounds before a PR is closed for good
+  close_on_fail: true           # false = label bouncer:fail and leave open
+  fail_confidence: 0.8          # a hard rule fails the PR only at or above this confidence
+  rereview_after_pass: true     # new commits after a pass need a new review
+  exempt_prior_contributors: true
+  exempt_users:
+    - dependabot[bot]
+    - renovate[bot]
+  # pin_review_to_gate_version: true   # only accept reviews from the exact same bouncer commit
+
+checks:                         # deterministic, no AI involved
+  require_linked_issue: true
+  max_changed_lines: 0          # 0 = no limit
+  max_author_prs_24h: 0         # 0 = no limit; PRs the author opened across GitHub in 24h
+  forbidden_paths:
+    - ".github/**"
+
+# Free text for the reviewer: scope, roadmap, things you never accept.
+guidance: |
+  We do not accept new dependencies without prior discussion in an issue.
+
+rules:
+  - id: solves-linked-issue
+    hard: true
+    description: The change actually resolves the linked issue as described there, not a superficial, partial or unrelated fix.
+  - id: not-duplicate
+    hard: true
+    description: It does not duplicate an open pull request, is not already fixed on the base branch, and does not redo something maintainers previously declined.
+  - id: correct
+    hard: true
+    description: No evident bugs, regressions, broken builds or nonsensical code (for example calls to APIs that do not exist in this codebase).
+  - id: substantive
+    hard: true
+    description: Not a trivial cosmetic change (typo-only, whitespace, renames, comment rewording, reformatting) unless the linked issue asks for exactly that.
+  - id: in-scope
+    hard: true
+    description: Serves the project's general users and stated scope, not a niche one-off use case or a feature the project does not want.
+  - id: matches-style
+    hard: false
+    description: Follows the conventions and structure of the surrounding code.
+  - id: has-tests
+    hard: false
+    description: Behavior changes come with tests, when the project has tests for that area.

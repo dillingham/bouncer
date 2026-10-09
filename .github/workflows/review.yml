@@ -1,0 +1,124 @@
+# Reusable workflow: the bouncer review.
+#
+# Called from a contributor's fork (via .github/workflows/bouncer-review.yml, which the
+# fork inherits from the upstream project). It runs on the contributor's runner minutes and
+# the contributor's ANTHROPIC_API_KEY, reviews the pull request against the maintainers'
+# .bouncer.yml, and signs the result with a GitHub artifact attestation.
+#
+# The contributor controls only the PR number and the key. The model, effort, rules,
+# prompt and API endpoint all come from this repository and the upstream base branch, and
+# the gate only accepts attestations signed by this exact workflow on a GitHub-hosted runner.
+name: Bouncer review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: Pull request number in the upstream repository
+        required: true
+        type: number
+    secrets:
+      anthropic_api_key:
+        description: The contributor's Anthropic API key
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Locate bouncer source
+        id: self
+        shell: python
+        run: |
+          import base64, json, os, urllib.request
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=bouncer-self"
+          req = urllib.request.Request(url, headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          token = json.load(urllib.request.urlopen(req))["value"]
+          part = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+          repo = "/".join(claims["job_workflow_ref"].split("@")[0].split("/")[:2])
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"repo={repo}\nsha={claims['job_workflow_sha']}\n")
+          print(f"bouncer {repo}@{claims['job_workflow_sha']}")
+
+      - name: Check out bouncer
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.self.outputs.repo }}
+          ref: ${{ steps.self.outputs.sha }}
+          path: .bouncer
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install --disable-pip-version-check -q -r .bouncer/requirements.txt
+
+      - name: Resolve pull request
+        id: pr
+        working-directory: .bouncer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+        run: python -m bouncer.review resolve --pr "$PR"
+
+      - name: Check out upstream base branch (read only)
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.pr.outputs.upstream }}
+          ref: ${{ steps.pr.outputs.base_sha }}
+          path: work/base
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Check out pull request head (read only, never executed)
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.pr.outputs.head_repo }}
+          ref: ${{ steps.pr.outputs.head_sha }}
+          path: work/head
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Review
+        id: review
+        working-directory: .bouncer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
+          BOUNCER_SHA: ${{ steps.self.outputs.sha }}
+          PR: ${{ inputs.pr }}
+          UPSTREAM: ${{ steps.pr.outputs.upstream }}
+          HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: >-
+          python -m bouncer.review run
+          --pr "$PR" --upstream "$UPSTREAM" --head-repo "$HEAD_REPO"
+          --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA"
+          --base-dir "$GITHUB_WORKSPACE/work/base" --head-dir "$GITHUB_WORKSPACE/work/head"
+          --out-dir "$GITHUB_WORKSPACE/out"
+
+      - name: Sign the review
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.review.outputs.subject_name }}
+          subject-digest: ${{ steps.review.outputs.subject_digest }}
+          predicate-type: https://bounced.dev/attestation/review/v1
+          predicate-path: out/predicate.json
+
+      - name: Keep the report
+        uses: actions/upload-artifact@v5
+        with:
+          name: bouncer-review-${{ inputs.pr }}
+          path: out/
+          retention-days: 30

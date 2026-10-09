@@ -1,0 +1,59 @@
+# Reusable workflow: the bouncer gate, run in the maintainer's repository.
+#
+# On new outside pull requests it asks for a review, then verifies the contributor's signed
+# review and passes or closes the pull request. It never checks out or runs pull request
+# code, which keeps pull_request_target safe here.
+name: Bouncer gate (reusable)
+
+on:
+  workflow_call:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      attestations: read
+      id-token: write # only used to find this workflow's own source
+    steps:
+      - name: Locate bouncer source
+        id: self
+        shell: python
+        run: |
+          import base64, json, os, urllib.request
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=bouncer-self"
+          req = urllib.request.Request(url, headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          token = json.load(urllib.request.urlopen(req))["value"]
+          part = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+          repo = "/".join(claims["job_workflow_ref"].split("@")[0].split("/")[:2])
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"repo={repo}\nsha={claims['job_workflow_sha']}\n")
+          print(f"bouncer {repo}@{claims['job_workflow_sha']}")
+
+      - name: Check out bouncer
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.self.outputs.repo }}
+          ref: ${{ steps.self.outputs.sha }}
+          path: .bouncer
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install --disable-pip-version-check -q -r .bouncer/requirements.txt
+
+      - name: Gate
+        working-directory: .bouncer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          BOUNCER_REPO: ${{ steps.self.outputs.repo }}
+          BOUNCER_SHA: ${{ steps.self.outputs.sha }}
+        run: python -m bouncer.gate
