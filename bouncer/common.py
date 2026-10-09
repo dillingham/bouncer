@@ -1,7 +1,8 @@
-"""Small shared pieces: the attestation subject, path globs, GitHub REST client."""
+"""Small shared pieces: the attestation subject, untrusted fences, path globs, GitHub REST client."""
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -18,7 +19,8 @@ SCHEMA_VERSION = 1
 # whatever ref ran, so an older review.yml can't claim a newer protocol. Bump both when a fix to
 # the review must not be bypassed by running an older version of it.
 #   1 (no field): the original review
-#   2: verdict hidden until signed, settings digest checked, skipped hard rules fail
+#   2: verdict hidden until signed, settings digest checked, skipped hard rules fail,
+#      tool output fenced as untrusted
 REVIEW_PROTOCOL = 2
 MIN_REVIEW_PROTOCOL = 2
 
@@ -34,6 +36,18 @@ def subject_name(upstream: str, pr: int, head_sha: str) -> str:
 
 def subject_digest(name: str) -> str:
     return hashlib.sha256(name.encode()).hexdigest()
+
+
+def untrusted(text: str, **attrs: str) -> str:
+    """Fence text from outside the maintainer team as data for the model:
+    <untrusted source="head:src/a.py">...</untrusted>.
+
+    A closing tag inside the text is escaped, so the text can't end the fence early and pass
+    off what follows as trusted. Attribute values (paths chosen by the model) are escaped too.
+    """
+    body = re.sub(r"<(?=\s*/\s*untrusted)", "&lt;", text, flags=re.IGNORECASE)
+    attr = "".join(f' {k}="{html.escape(str(v), quote=True)}"' for k, v in attrs.items())
+    return f"<untrusted{attr}>\n{body}\n</untrusted>"
 
 
 def glob_to_regex(pattern: str) -> re.Pattern:

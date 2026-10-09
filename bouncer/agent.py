@@ -11,7 +11,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .common import GitHub, GitHubError
+from .common import GitHub, GitHubError, untrusted
 
 MAX_TOOL_OUTPUT = 20_000
 ROOTS = ["base", "head"]
@@ -262,21 +262,26 @@ class Agent:
         return json.dumps({"total": res.get("total_count", 0), "items": items}, indent=1)
 
     def run_tool(self, name: str, args: dict) -> str:
+        """Run a read-only tool. Repository and issue content comes back fenced as untrusted data,
+        like the PR text in the prompt (evidence is later checked against the files, not this)."""
         self.usage.tool_calls[name] = self.usage.tool_calls.get(name, 0) + 1
         try:
             if name == "list_dir":
-                return _clip(self.ws.list_dir(args["root"], args["path"]))
-            if name == "read_file":
-                return _clip(self.ws.read_file(args["root"], args["path"], int(args["start_line"]), int(args["end_line"])))
-            if name == "grep":
-                return _clip(self.ws.grep(args["root"], args["pattern"], args.get("path_glob", "")))
-            if name == "get_issue":
-                return _clip(self._get_issue(int(args["number"])))
-            if name == "search_issues":
-                return _clip(self._search(args["query"], args["kind"], args["state"]))
-            return f"error: unknown tool {name}"
+                text, source = self.ws.list_dir(args["root"], args["path"]), f"{args['root']}:{args['path'] or '.'}"
+            elif name == "read_file":
+                text = self.ws.read_file(args["root"], args["path"], int(args["start_line"]), int(args["end_line"]))
+                source = f"{args['root']}:{args['path']}"
+            elif name == "grep":
+                text, source = self.ws.grep(args["root"], args["pattern"], args.get("path_glob", "")), f"{args['root']}:grep"
+            elif name == "get_issue":
+                text, source = self._get_issue(int(args["number"])), f"issue:#{int(args['number'])}"
+            elif name == "search_issues":
+                text, source = self._search(args["query"], args["kind"], args["state"]), "issue_search"
+            else:
+                return f"error: unknown tool {name}"
         except (ToolError, GitHubError, KeyError, ValueError, OSError) as e:
             return f"error: {e}"
+        return untrusted(_clip(text), source=source)
 
     # --- loop ------------------------------------------------------------
     def _create(self, system, messages):

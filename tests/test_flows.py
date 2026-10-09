@@ -59,7 +59,7 @@ def test_agent_loop(tmp_path):
     second = msgs.calls[1]
     # assistant turn echoed with its thinking block intact, then the tool result
     assert second["messages"][1]["content"][0]["type"] == "thinking"
-    assert second["messages"][2]["content"][0]["content"] == "1: x = 1"
+    assert second["messages"][2]["content"][0]["content"] == '<untrusted source="head:a.py">\n1: x = 1\n</untrusted>'
     assert msgs.calls[0]["output_config"] == {"effort": "high"}
     assert all(t["strict"] for t in msgs.calls[0]["tools"])
     assert "temperature" not in msgs.calls[0]
