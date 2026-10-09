@@ -3,6 +3,7 @@
 The model never decides on its own. A PR fails only when:
   * a deterministic check from .bouncer.yml fails, or
   * the PR text tried to instruct the reviewer, or
+  * the review has no verdict at all for a hard rule (skipping a rule must not pass it), or
   * a hard rule failed with confidence at or above the threshold AND at least
     one piece of evidence was verified against the actual files.
 Everything else the model flags is reported to the maintainer as a soft flag.
@@ -59,8 +60,12 @@ def decide(predicate: dict, cfg: Config) -> Decision:
     results = {r.get("id"): r for r in review.get("rules", [])}
     for rule in cfg.rules:
         r = results.get(rule.id)
-        if not r or r.get("result") != "fail":
-            if r and r.get("result") == "unsure":
+        if not r:
+            line = f"`{rule.id}`: the review didn't judge this rule."
+            (d.reasons if rule.hard else d.flags).append(line)
+            continue
+        if r.get("result") != "fail":
+            if r.get("result") == "unsure":
                 d.flags.append(f"`{rule.id}`: reviewer was unsure. {r.get('reason', '')}".strip())
             continue
         verified = [e for e in r.get("evidence", []) if e.get("verified")]

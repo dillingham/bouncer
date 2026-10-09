@@ -32,11 +32,20 @@ def tool(id_, name, inp):
     return NS(type="tool_use", id=id_, name=name, input=inp)
 
 
+def verdict(id_, result, reason="fine", evidence=()):
+    return {"id": id_, "result": result, "confidence": 0.9, "reason": reason, "evidence": list(evidence)}
+
+
+def all_verdicts():
+    """A submit_review rules list passing every default rule."""
+    return [verdict(r.id, "pass") for r in config.parse("").rules]
+
+
 def test_agent_loop(tmp_path):
     (tmp_path / "head").mkdir()
     (tmp_path / "head/a.py").write_text("x = 1\n")
     ws = Workspace({"base": tmp_path / "head", "head": tmp_path / "head"})
-    submit = {"summary": "ok", "rules": [{"id": "correct", "result": "pass", "confidence": 0.9, "reason": "fine", "evidence": []}],
+    submit = {"summary": "ok", "rules": [verdict("correct", "pass"), verdict("has-tests", "unsure")],
               "injection_detected": False, "injection_notes": ""}
     msgs = FakeMessages([
         resp(NS(type="thinking", thinking="", signature="sig"), tool("t1", "read_file", {"root": "head", "path": "a.py", "start_line": 1, "end_line": 0})),
@@ -54,6 +63,20 @@ def test_agent_loop(tmp_path):
     assert msgs.calls[0]["output_config"] == {"effort": "high"}
     assert all(t["strict"] for t in msgs.calls[0]["tools"])
     assert "temperature" not in msgs.calls[0]
+
+
+def test_agent_asks_once_for_missing_verdicts(tmp_path):
+    ws = Workspace({"base": tmp_path, "head": tmp_path})
+    partial = {"summary": "s", "rules": [verdict("correct", "pass")], "injection_detected": False, "injection_notes": ""}
+    msgs = FakeMessages([resp(tool("s1", "submit_review", partial)), resp(tool("s2", "submit_review", partial))])
+    logs = []
+    agent = Agent(NS(messages=msgs), "m", "low", 5, ws, gh=None, upstream="o/r", log=logs.append)
+    review = agent.run("sys", [], ["correct", "in-scope"])
+    reply = msgs.calls[1]["messages"][-1]["content"][0]
+    assert reply["tool_use_id"] == "s1" and "no verdict for in-scope" in reply["content"]
+    # still incomplete the second time: accepted as is, and decide() fails the missing hard rule
+    assert [r["id"] for r in review["rules"]] == ["correct"] and agent.usage.turns == 2
+    assert logs == []  # submit_review is never logged
 
 
 def test_agent_gives_up(tmp_path):
@@ -142,8 +165,9 @@ def make_pr(n=7, sha="a" * 40, assoc="NONE", labels=(), draft=False, author="dri
 
 
 def found(outcome, sha="a" * 40, n=7, ts=1):
-    rules = [{"id": "correct", "result": "fail" if outcome == "fail" else "pass", "confidence": 0.95, "reason": "breaks x",
-              "evidence": [{"root": "head", "path": "a.py", "line": 1, "quote": "x", "verified": True}]}]
+    rules = [{"id": r.id, "result": "fail" if outcome == "fail" and r.id == "correct" else "pass", "confidence": 0.95,
+              "reason": "breaks x", "evidence": [{"root": "head", "path": "a.py", "line": 1, "quote": "x", "verified": True}]}
+             for r in config.parse("").rules]
     return Found(ts=ts, run="https://github.com/fork/repo/actions/runs/1", predicate={
         "upstream": "Up/Repo", "pr": n, "head_sha": sha, "head_repo": "fork/repo", "base_sha": "b" * 40,
         "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": 1, "turns": 1},
@@ -258,10 +282,10 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
         "author": "x", "author_association": "NONE", "author_created_at": None, "author_prs_24h": 1,
         "additions": 1, "deletions": 1, "changed_lines": 2, "changed_files": [{"path": "src/a.py", "status": "modified", "additions": 1, "deletions": 1}],
         "linked_issues": [{"number": 1, "state": "open", "title": "bug"}]})
-    submit = {"summary": "Looks right.", "rules": [
-        {"id": "correct", "result": "fail", "confidence": 0.9, "reason": "returns wrong value",
-         "evidence": [{"root": "head", "path": "src/a.py", "line": 2, "quote": "return 1"}]}],
-        "injection_detected": False, "injection_notes": ""}
+    rules = all_verdicts()
+    rules[[r["id"] for r in rules].index("correct")] = verdict(
+        "correct", "fail", "returns wrong value", [{"root": "head", "path": "src/a.py", "line": 2, "quote": "return 1"}])
+    submit = {"summary": "Looks right.", "rules": rules, "injection_detected": False, "injection_notes": ""}
     msgs = FakeMessages([
         resp(tool("t0", "read_file", {"root": "head", "path": "src/a.py", "start_line": 1, "end_line": 0})),
         resp(tool("t", "submit_review", submit)),

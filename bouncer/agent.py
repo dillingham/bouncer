@@ -292,7 +292,7 @@ class Agent:
 
     def run(self, system: str, user_content: list, rule_ids: list[str]) -> dict:
         messages: list = [{"role": "user", "content": user_content}]
-        nudged = False
+        nudged = reasked = False
         while True:
             if self.usage.turns >= self.max_turns + 2:
                 raise ReviewFailed("the reviewer did not submit a verdict within the turn budget")
@@ -305,21 +305,35 @@ class Agent:
             messages.append({"role": "assistant", "content": resp.content})
             tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
             submit = next((b for b in tool_uses if b.name == "submit_review"), None)
-            # Returned before anything is logged: the verdict must not show in the run's logs
-            # until the review is signed (see bouncer/review.py).
+            # submit_review is never logged: the verdict must not show in the run's logs until
+            # the review is signed (see bouncer/review.py).
             if submit is not None:
-                return normalize_review(submit.input, rule_ids)
+                missing = missing_rules(submit.input, rule_ids)
+                # A hard rule without a verdict fails the PR, so the reviewer gets one chance to finish.
+                if not missing or reasked or self.usage.turns >= self.max_turns + 2:
+                    return normalize_review(submit.input, rule_ids)
+                reasked = True
             if not tool_uses:
                 messages.append({"role": "user", "content": "Call submit_review now with your verdict for every rule."})
                 continue
             results = []
             for b in tool_uses:
-                self.log(f"  tool {b.name} {json.dumps(b.input)[:160]}")
-                results.append({"type": "tool_result", "tool_use_id": b.id, "content": self.run_tool(b.name, b.input)})
+                if b.name == "submit_review":
+                    content = (f"error: no verdict for {', '.join(missing)}. "
+                               "Call submit_review again with a verdict for every rule.")
+                else:
+                    self.log(f"  tool {b.name} {json.dumps(b.input)[:160]}")
+                    content = self.run_tool(b.name, b.input)
+                results.append({"type": "tool_result", "tool_use_id": b.id, "content": content})
             if self.usage.turns >= self.max_turns and not nudged:
                 nudged = True
                 results.append({"type": "text", "text": "Turn budget reached. Call submit_review now; mark anything you could not establish as unsure."})
             messages.append({"role": "user", "content": results})
+
+
+def missing_rules(raw: dict, rule_ids: list[str]) -> list[str]:
+    given = {str(r.get("id", "")) for r in raw.get("rules", []) or [] if isinstance(r, dict)}
+    return [rid for rid in rule_ids if rid not in given]
 
 
 def normalize_review(raw: dict, rule_ids: list[str]) -> dict:
@@ -347,8 +361,9 @@ def normalize_review(raw: dict, rule_ids: list[str]) -> dict:
                 "reason": str(r.get("reason", ""))[:1500],
                 "evidence": ev,
             }
-    rules = [by_id.get(rid) or {"id": rid, "result": "unsure", "confidence": 0.0,
-                                "reason": "Not evaluated by the reviewer.", "evidence": []} for rid in rule_ids]
+    # Rules the reviewer skipped stay out, rather than becoming "unsure": decide() fails a PR
+    # whose review has no verdict for a hard rule.
+    rules = [by_id[rid] for rid in rule_ids if rid in by_id]
     return {
         "summary": str(raw.get("summary", ""))[:2000],
         "rules": rules,

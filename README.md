@@ -34,7 +34,7 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
 | Cancel runs heading for a bounce before they're signed | Nothing in the run (logs, summary, outputs) shows the verdict until the attestation exists. |
 | Push commits to reroll | Each new commit is a new round that costs their tokens again, and bounced rounds are capped. |
 | Reuse a pass from another PR or commit | The repo, PR number and head commit are inside the signed payload and checked. |
-| Prompt-inject the reviewer through the PR | PR text is fenced as untrusted data; attempts are flagged and fail the PR; a model "fail" also needs verified evidence and the final call is made in code, not by the model. |
+| Prompt-inject the reviewer through the PR | PR text is fenced as untrusted data; attempts are flagged and fail the PR; a model "fail" also needs verified evidence, a hard rule the review skips counts as failed, and the final call is made in code, not by the model. |
 | Forge a bouncer state comment | Only comments by `github-actions[bot]` are read. |
 
 ## Add it to a project (maintainers)

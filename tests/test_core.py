@@ -80,10 +80,14 @@ def test_state_only_trusted_from_bot():
 
 
 # --- decision -----------------------------------------------------------------
-def pred(rules=None, facts=None, injection=False):
+def pred(rules=None, facts=None, injection=False, drop=()):
+    """A predicate passing every default rule, except the verdicts in `rules` and the rules in `drop`."""
     f = {"linked_issues": [{"number": 1, "state": "open"}], "changed_files": [{"path": "src/a.py"}], "changed_lines": 10}
     f.update(facts or {})
-    return {"facts": f, "review": {"rules": rules or [], "injection_detected": injection, "injection_notes": ""}}
+    by_id = {r.id: rule(r.id, "pass") for r in config.parse("").rules}
+    by_id.update({r["id"]: r for r in rules or []})
+    verdicts = [r for rid, r in by_id.items() if rid not in drop]
+    return {"facts": f, "review": {"rules": verdicts, "injection_detected": injection, "injection_notes": ""}}
 
 
 def rule(id_, result, conf=0.9, verified=True):
@@ -100,6 +104,19 @@ def test_decide_pass_and_failures():
         d = decide(pred([r]), cfg)
         assert d.outcome == "pass" and d.flags
     assert decide(pred(injection=True), cfg).outcome == "fail"
+
+
+def test_decide_missing_verdicts():
+    cfg = config.parse("")
+    # a hard rule the review skipped fails the PR
+    d = decide(pred(drop=["in-scope"]), cfg)
+    assert d.outcome == "fail" and d.reasons == ["`in-scope`: the review didn't judge this rule."]
+    # a skipped soft rule is only a note
+    d = decide(pred(drop=["has-tests"]), cfg)
+    assert d.outcome == "pass" and any("has-tests" in f for f in d.flags)
+    # an explicit "unsure" on a hard rule still only flags (unchanged)
+    d = decide(pred([rule("in-scope", "unsure", conf=0.3)]), cfg)
+    assert d.outcome == "pass" and any("unsure" in f for f in d.flags)
 
 
 def test_decide_deterministic_checks():
@@ -159,4 +176,5 @@ def test_evidence_verification(ws):
     verify_evidence(review, ws)
     assert [e["verified"] for e in review["rules"][0]["evidence"]] == [True, False, False, False]
     assert review["rules"][0]["confidence"] == 1.0
-    assert review["rules"][1]["result"] == "unsure"
+    # has-tests was not judged, so it is left out for decide() to treat as missing
+    assert [r["id"] for r in review["rules"]] == ["correct"]
