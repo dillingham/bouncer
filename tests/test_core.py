@@ -14,7 +14,7 @@ from bouncer.common import PREDICATE_TYPE, path_matches, subject_digest, subject
 from bouncer.decide import brief, decide
 from bouncer.facts import linked_issue_numbers
 from bouncer.gate import parse_verify_output
-from bouncer.render import clean, parse_state, review_markdown, state_block
+from bouncer.render import MAX_REPORT, clean, parse_state, review_markdown, state_block
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -326,6 +326,26 @@ def test_report_layout():
     body = review_markdown(p, decide(p, cfg), cfg)
     assert body.startswith("### ✅ Bouncer review: Passed") and "**Why it was bounced**" not in body
     assert "**For the maintainer** (these didn't fail the pull request)\n\n- `in-scope` (Required): r Didn't fail" in body
+
+
+@pytest.mark.parametrize("limit", [MAX_REPORT, 9000])
+def test_report_always_fits_with_footer_and_closed_tags(limit):
+    rules = "\n".join(f"  - {{id: r{i}, hard: {str(i % 3 > 0).lower()}, description: x}}" for i in range(30))
+    cfg = config.parse("rules:\n" + rules)
+    verdicts = [{"id": f"r{i}", "result": "fail", "confidence": 0.95 if i % 2 else 0.5, "reason": "<" * 1500,
+                 "evidence": [{"root": "head", "path": "é" * 300, "line": 1, "quote": "q", "verified": True}] * 8}
+                for i in range(30)]
+    p = {"head_repo": "f/r", "head_sha": "a" * 40, "upstream": "u/r", "base_sha": "b" * 40, "model": "m", "usage": {},
+         "run_url": "https://github.com/f/r/actions/runs/1", "facts": {"linked_issues": [{"state": "open"}]},
+         "review": {"summary": "<" * 5000, "rules": verdicts}}
+    d = decide(p, cfg)
+    assert len(d.reasons) > 5 and len(d.flags) > 5
+    body = review_markdown(p, d, cfg, next_steps="**To try again** ...", limit=limit)
+    assert len(body) <= limit
+    assert body.endswith("[signed run](https://github.com/f/r/actions/runs/1)</sub>")
+    assert body.count("<details>") == body.count("</details>") >= 2
+    assert "more, left out to fit GitHub's comment size limit" in body and "**To try again**" in body
+    assert body.index("**Why it was bounced**") < body.index("**To try again**")
 
 
 # --- gh attestation output -----------------------------------------------------
