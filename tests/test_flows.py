@@ -947,6 +947,9 @@ def test_resolve_push_waits_for_pr_to_catch_up(monkeypatch, tmp_path):
     assert code == 0 and out["head_sha"] == "new"
     gh = ResolveGH([_pr(sha="old")], {3: _pr(sha="old")})
     assert run_resolve(monkeypatch, tmp_path, gh, "push", sha="new")[1] == {"skip": "true"}
+    # the sixth and last fetch, a minute in, is the one that has it
+    gh = ResolveGH([_pr(sha="old")], {3: [_pr(sha="old")] * 5 + [_pr(sha="new")]})
+    assert run_resolve(monkeypatch, tmp_path, gh, "push", sha="new")[1]["head_sha"] == "new"
 
 
 class ForkOfForkGH(ResolveGH):

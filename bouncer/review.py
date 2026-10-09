@@ -119,7 +119,7 @@ def cmd_resolve(args, sleep=time.sleep) -> None:
                 break
             sleep(10)
             pr = gh.get(f"/repos/{parent}/pulls/{n}")
-        else:
+        if pr["head"]["sha"] != pushed:  # checked after the last fetch too
             skip(f"{parent}#{n} hasn't picked up commit {pushed[:12]} yet. Push again or run the review manually.")
 
     _out(skip="false", pr=n, upstream=parent, head_repo=me, base_sha=pr["base"]["sha"], head_sha=pr["head"]["sha"])
