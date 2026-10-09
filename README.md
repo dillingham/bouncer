@@ -57,6 +57,21 @@ The gate's comment has one instruction: install the extension and run `gh bounce
 
 If the maintainers change the review settings (model, effort, turns, guidance or rules) after a review ran, or the review was made with an outdated version of bouncer, it doesn't count: the gate's comment says so and asks the contributor to run `gh bouncer` again. That doesn't use up a review round.
 
+## State comment
+
+The gate keeps one comment per pull request up to date (posted by `github-actions[bot]`, the only author it trusts). It ends with the state as JSON in `<!-- bouncer:state {...} -->`; `gh bouncer` reads it too. `<`, `>` and `&` inside the JSON are escaped as `<`, `>` and `&`. Fields tools can rely on:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | `pending`, `pass`, `fail`, `expired`, `exhausted`, `override`, `wrong_base`, `draft` or `no_fork` |
+| `sha` | string | the head commit the status is about |
+| `left` | int | review attempts left |
+| `deadline` | string | while `pending`: when the PR is closed without a review, ISO 8601 UTC (`2026-10-11T12:00:00Z`) |
+| `report` | string | URL of the latest review report comment for this round, `""` if none |
+| `reasons` | list of strings | only when bounced (`fail`, `wrong_base`): up to 5 short reasons, like `correct: Calls http.retry(), which doesn't exist.` |
+| `model`, `effort` | string | the review settings in the current `.bouncer.yml` |
+| `note` | string | only while `pending`, when the latest signed review didn't count or couldn't be checked: `config_changed`, `outdated` or `verify_error` |
+
 ## Before trusting it on a busy repo
 
 These need a live run to confirm; none can be exercised offline:

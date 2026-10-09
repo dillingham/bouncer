@@ -20,13 +20,15 @@ from typing import Callable
 
 from . import config as config_mod
 from .common import MIN_REVIEW_PROTOCOL, PREDICATE_TYPE, GitHub, GitHubError, subject_name
-from .decide import decide
+from .decide import brief, decide
 from .render import (STALE_NOTES, clean, find_state, fmt_deadline, instructions, parse_state, review_markdown,
                      state_block)
 
 L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
 LABEL_COLORS = {L_PENDING: "fbca04", L_PASS: "0e8a16", L_FAIL: "b60205", L_SKIP: "c5def5"}
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+# Why a signed review didn't count (state "stale", see Gate._stale), as the state's "note" for the CLI.
+STALE_STATE_NOTES = {"config": "config_changed", "protocol": "outdated"}
 ISO = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -197,10 +199,23 @@ class Gate:
         if state.pop("drafted", False):
             self._draft(pr, False)
 
-    def _comment(self, n: int, body: str) -> None:
-        self.gh.post(f"/repos/{self.repo}/issues/{n}/comments", {"body": body[:65000]})
+    def _comment(self, n: int, body: str) -> dict:
+        return self.gh.post(f"/repos/{self.repo}/issues/{n}/comments", {"body": body[:65000]}) or {}
 
     def _save_state(self, n: int, sticky: dict | None, text: str, state: dict) -> dict:
+        """Write the state comment: the text for people, then the state as JSON for the gate's next
+        run and for `gh bouncer`. The fields the CLI reads are kept up to date here (the state
+        contract in the README)."""
+        state["left"] = max(0, self.cfg.max_attempts - int(state.get("fails", 0)))
+        state["model"], state["effort"] = self.cfg.model, self.cfg.effort
+        state.setdefault("report", "")
+        if state.get("status") == "pending":
+            state["deadline"] = self._deadline(state).strftime(ISO)
+        else:
+            state.pop("deadline", None)
+            state.pop("note", None)
+        if state.get("status") not in ("fail", "wrong_base"):
+            state.pop("reasons", None)
         body = f"{text}\n\n{state_block(state)}"
         self._persisted[n] = _snapshot(state)
         if sticky:
@@ -310,9 +325,11 @@ class Gate:
                          f"{self.action_repo}@{ref} (compare: {status})")
         return self._signer_ok[sha]
 
-    def _instructions(self, n: int, head_repo: str, state: dict, note: str = "") -> str:
+    def _instructions(self, n: int, head_repo: str, state: dict) -> str:
+        """The pending round's comment, with the note on why a signed review didn't count, if any."""
         return instructions(n, head_repo, self.repo, fmt_deadline(self._deadline(state)),
-                            self.cfg.max_attempts - int(state.get("fails", 0)), self.cfg, self.server, note)
+                            self.cfg.max_attempts - int(state.get("fails", 0)), self.cfg, self.server,
+                            STALE_NOTES.get(state.get("stale"), ""))
 
     # --- main flow ------------------------------------------------------------
     def process(self, pr: dict, action: str | None = None, sender: str | None = None) -> str:
@@ -417,7 +434,7 @@ class Gate:
             # Same commit, so same round.
             state["requested_at"] = self.now.strftime(ISO)
             self._hold(pr, state)
-            self._save_state(n, sticky, self._instructions(n, head_repo, state, STALE_NOTES.get(state.get("stale"), "")), state)
+            self._save_state(n, sticky, self._instructions(n, head_repo, state), state)
             self._set_labels(n, labels, L_PENDING)
             self.log(f"#{n}: new deadline ({action})")
 
@@ -433,6 +450,9 @@ class Gate:
             # deadline close the pull request on an outage.
             self.log(f"::warning::#{n}: couldn't check for a signed review, trying again next run "
                      f"(not closing it at the deadline meanwhile): {e}")
+            if state.get("note") != "verify_error" and self._unchanged(n, sticky, head_sha):
+                state["note"] = "verify_error"  # for `gh bouncer`, which waits on the verdict
+                self._save_state(n, sticky, self._instructions(n, head_repo, state), state)
             return "verify-error"
         valid = [f for f in found if not self._stale(f.predicate)]
         # Signed reviews of this commit that don't count. That's not a fail and uses no round:
@@ -441,7 +461,10 @@ class Gate:
         if stale:
             self.log(f"#{n}: signed review doesn't count ({stale})")
         expired = not valid and not wip and self.now >= self._deadline(state)
-        if not (valid or expired or (stale and state.get("stale") != stale)):
+        # The state's note says why the latest signed review didn't count (cleared after an error).
+        note = STALE_STATE_NOTES.get(stale or state.get("stale"))
+        renote = (stale and state.get("stale") != stale) or state.get("note") != note
+        if not (valid or expired or renote):
             self.log(f"#{n}: waiting for review")
             return "pending"
 
@@ -451,9 +474,13 @@ class Gate:
         pr, labels = fresh, {lb["name"] for lb in fresh.get("labels", [])}
         if valid:
             return self._apply(pr, labels, sticky, state, valid[0], attempts=len(valid))
-        if stale and state.get("stale") != stale:
-            state["stale"] = stale
-            self._save_state(n, sticky, self._instructions(n, head_repo, state, STALE_NOTES[stale]), state)
+        if renote:
+            for key, value in (("stale", stale or state.get("stale")), ("note", note)):
+                if value:
+                    state[key] = value
+                else:
+                    state.pop(key, None)
+            self._save_state(n, sticky, self._instructions(n, head_repo, state), state)
 
         if expired:
             state["status"] = "expired"
@@ -503,11 +530,12 @@ class Gate:
             fix = ("Open a new pull request against the right branch (a closed pull request's base can't be changed)."
                    if self.cfg.close_on_fail else "Change the base branch, then comment `/bouncer check`.")
             prev = state or {}
+            why = f"this pull request targets `{clean(base, 200)}`, but this project only takes outside pull requests {target}."
             state = {"v": 1, "sha": head_sha, "status": "wrong_base", "base": base,
                      "rounds": int(prev.get("rounds", 0)), "fails": int(prev.get("fails", 0)),
+                     "reasons": [brief(f"Pre-check: {why}")],
                      **({"drafted": True} if prev.get("drafted") else {})}
-            self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ Bounced: this pull request targets `{clean(base, 200)}`, "
-                             f"but this project only takes outside pull requests {target}. {fix}", state)
+            self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ Bounced: {why} {fix}", state)
         self._set_labels(n, labels, L_FAIL)
         if self.cfg.close_on_fail:
             self._close(n)
@@ -520,10 +548,12 @@ class Gate:
         report = review_markdown(f.predicate, d, self.cfg, self.server)
         if attempts > 1:
             report += f"\n\n<sub>{attempts} reviews were run for this commit; only the first one counts.</sub>"
-        self._comment(n, report)
+        state["report"] = self._comment(n, report).get("html_url", "")
         state["status"] = d.outcome
         state["run"] = f.run
         state.pop("stale", None)
+        if d.reasons:
+            state["reasons"] = [brief(r) for r in d.reasons[:5]]
         if d.outcome == "pass":
             self._release(pr, state)
             self._save_state(n, sticky, "### 🚪 Bouncer\n\n✅ Passed. Ready for a maintainer.", state)

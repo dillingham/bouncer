@@ -124,7 +124,10 @@ def review_markdown(p: dict, d: Decision, cfg: Config, server: str = "https://gi
 
 
 def state_block(state: dict) -> str:
-    return f"{STATE_MARKER}{json.dumps(state, separators=(',', ':'))} -->"
+    """The state as JSON in an HTML comment. <, > and & are escaped inside the JSON, so no value
+    (a review reason, say) can end the comment early or forge another marker."""
+    data = json.dumps(state, separators=(",", ":")).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return f"{STATE_MARKER}{data} -->"
 
 
 def parse_state(comments: list[dict]) -> tuple[dict | None, dict | None]:
