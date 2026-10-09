@@ -651,6 +651,8 @@ def main() -> None:
         print(f"::warning::.bouncer.yml: {w}")
     host = urllib.parse.urlparse(server).netloc
     signer = f"{host}/{bouncer_repo}/.github/workflows/review.yml"
+    # Run from a local path there's no ref: use the action's default branch, as the signer check does.
+    bouncer_ref = bouncer_ref or gh.get(f"/repos/{bouncer_repo}")["default_branch"]
     digest = None
     if cfg.pin_review_to_gate_version:
         digest = gh.get(f"/repos/{bouncer_repo}/commits/{urllib.parse.quote(bouncer_ref, safe='')}")["sha"]
