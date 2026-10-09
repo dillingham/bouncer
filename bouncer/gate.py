@@ -21,7 +21,8 @@ from typing import Callable
 from . import config as config_mod
 from .common import MIN_REVIEW_PROTOCOL, PREDICATE_TYPE, GitHub, GitHubError, subject_name
 from .decide import decide
-from .render import STALE_NOTES, clean, find_state, instructions, parse_state, review_markdown, state_block
+from .render import (STALE_NOTES, clean, find_state, fmt_deadline, instructions, parse_state, review_markdown,
+                     state_block)
 
 L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
 LABEL_COLORS = {L_PENDING: "fbca04", L_PASS: "0e8a16", L_FAIL: "b60205", L_SKIP: "c5def5"}
@@ -31,10 +32,6 @@ ISO = "%Y-%m-%dT%H:%M:%SZ"
 
 def _parse_time(s: str) -> dt.datetime:
     return dt.datetime.strptime(s, ISO).replace(tzinfo=dt.timezone.utc)
-
-
-def _fmt_deadline(t: dt.datetime) -> str:
-    return t.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _snapshot(state: dict | None) -> str:
@@ -314,8 +311,8 @@ class Gate:
         return self._signer_ok[sha]
 
     def _instructions(self, n: int, head_repo: str, state: dict, note: str = "") -> str:
-        return instructions(n, head_repo, self.repo, _fmt_deadline(self._deadline(state)),
-                            self.cfg.max_attempts - int(state.get("fails", 0)), self.server, note)
+        return instructions(n, head_repo, self.repo, fmt_deadline(self._deadline(state)),
+                            self.cfg.max_attempts - int(state.get("fails", 0)), self.cfg, self.server, note)
 
     # --- main flow ------------------------------------------------------------
     def process(self, pr: dict, action: str | None = None, sender: str | None = None) -> str:

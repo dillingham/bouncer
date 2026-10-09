@@ -1,6 +1,7 @@
 """Markdown for PR comments. All model- and contributor-sourced text goes through clean()."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 
@@ -168,28 +169,66 @@ def find_state(gh, repo: str, n: int) -> tuple[dict | None, dict | None]:
 # Why a signed review of the current commit doesn't count (see Gate._stale), for the contributor.
 STALE_NOTES = {
     "config": "Your signed review doesn't count: the maintainers changed the bouncer settings after it ran. "
-              "Run the review again with the command below. This doesn't use up a review round.",
+              "Run the review again with the command below. This doesn't use up a review attempt.",
     "protocol": "Your signed review doesn't count: it was made with an outdated version of the bouncer review. "
                 "Run the review again with the command below. If this note comes back, sync your fork's default "
-                "branch with this repository first. This doesn't use up a review round.",
+                "branch with this repository first. This doesn't use up a review attempt.",
 }
 
 
-def instructions(pr: int, head_repo: str, upstream: str, deadline: str, attempts_left: int,
+def fmt_deadline(t: dt.datetime) -> str:
+    """A deadline people can read at a glance: Sun Oct 11, 12:00 UTC."""
+    return f"{t:%a %b} {t.day}, {t:%H:%M} UTC"
+
+
+def instructions(pr: int, head_repo: str, upstream: str, deadline: str, attempts_left: int, cfg: Config,
                  server: str = "https://github.com", note: str = "") -> str:
+    """The comment asking the contributor to run the review: the command first, the details
+    (how it works, what it checks) collapsed below."""
     url = f"{server}/{upstream}/pull/{pr}"
-    warning = f"> ⚠️ {note}\n\n" if note else ""
-    return f"""### 🚪 Bouncer review required
-
-{warning}This project has an automated bouncer review outside pull requests before a maintainer looks at them. **The review runs in your fork, on your own Anthropic API key.** Maintainers pay nothing and pick it up once it passes.
-
-Run this with the [GitHub CLI](https://cli.github.com):
-
-```
-gh extension install gh-bouncer/gh-bouncer
-gh bouncer {url}
-```
-
-It sets up the review in your fork, asks for your key the first time (it's stored only as a secret in your fork), runs the review and reports back here. After that, every push to this branch is reviewed automatically.
-
-Only the first review of each commit counts. Deadline: **{deadline}**, after which this pull request is closed. Review rounds left: {attempts_left}."""
+    checks = []
+    if cfg.require_linked_issue:
+        checks.append("An open issue is linked, for example `Fixes #123` in the description.")
+    if cfg.max_changed_lines:
+        checks.append(f"At most {cfg.max_changed_lines:,} changed lines.")
+    if cfg.forbidden_paths:
+        checks.append("No changes to " + ", ".join(f"`{p}`" for p in cfg.forbidden_paths) + ".")
+    if cfg.max_author_prs_24h:
+        checks.append(f"At most {cfg.max_author_prs_24h} pull requests opened across GitHub in the last 24 hours.")
+    lines = ["### 🚪 Bouncer review required", ""]
+    if note:
+        lines += [f"> ⚠️ {note}", ""]
+    lines += [
+        "Thanks for the pull request! Before a maintainer looks at it, this project asks outside contributors "
+        "to run an AI review of their change. **It runs in your fork's GitHub Actions, on your own Anthropic API key**, "
+        "so maintainers pay nothing.",
+        "",
+        "```",
+        "gh extension install gh-bouncer/gh-bouncer",
+        f"gh bouncer {url}",
+        "```",
+        "",
+        f"**Deadline:** {deadline} · {_n(attempts_left, 'review attempt')} left",
+        "",
+        "<details><summary>How it works</summary>",
+        "",
+        f"- [`gh bouncer`](https://gh-bouncer.com) turns on Actions in your fork, asks for your Anthropic API key once "
+        f"(saved only as an Actions secret in `{head_repo}`), runs the review there and reports back here.",
+        f"- The review uses {cfg.model} at {cfg.effort} effort, billed to your key. "
+        "Your code is checked out read only and never run.",
+        "- GitHub signs the result. Only the first review of each commit counts.",
+        "- Once your key is saved, every push to this pull request starts a new review automatically.",
+        "- No review by the deadline closes the pull request. You can reopen it and run the review then.",
+        "",
+        "</details>",
+        "",
+        "<details><summary>What the review checks</summary>",
+        "",
+    ]
+    if checks:
+        lines += ["**Pre-checks**, checked in code before the review:", ""] + [f"- {c}" for c in checks] + [""]
+    lines += ["**Agent Rules.** A Required rule can bounce the pull request; an Advisory one is only reported "
+              "to the maintainers.", ""]
+    lines += [f"- `{r.id}` ({kind(r.hard)}): {clean(r.description, 300)}" for r in sorted(cfg.rules, key=lambda r: not r.hard)]
+    lines += ["", "</details>"]
+    return "\n".join(lines)

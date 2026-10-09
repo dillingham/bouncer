@@ -888,6 +888,13 @@ def test_instructions_are_one_command():
     body = gh.bodies(7)[0]
     assert "gh extension install gh-bouncer/gh-bouncer" in body
     assert "gh bouncer https://github.com/up/repo/pull/7" in body
+    assert "**Deadline:** Sun Oct 11, 12:00 UTC · 3 review attempts left" in body
+    assert "automated bouncer review outside pull requests" not in body  # the old garbled sentence
+    # the details are collapsed: how it works, and what the review checks (pre-checks, Agent Rules)
+    how, checks = body.split("<details><summary>")[1:]
+    assert how.startswith("How it works</summary>") and "claude-opus-5-5 at high effort" in how
+    assert checks.startswith("What the review checks</summary>") and "**Pre-checks**" in checks
+    assert "- `correct` (Required): " in checks and "- `has-tests` (Advisory): " in checks
 
 
 def test_action_identity_from_runner_path():
