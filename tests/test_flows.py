@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import os
 import subprocess
+import urllib.parse
 from types import SimpleNamespace as NS
 
 import pytest
@@ -170,6 +171,7 @@ class FakeGitHub:
         self.compare = {SIGNER: "ahead"}
         self.compare_calls = []
         self.draft_refused = False  # GitHub may refuse convertPullRequestToDraft for the Actions token
+        self.repo_labels = {}  # the repository's labels: name -> label
 
     def see(self, pr):
         """The pull request is now at this head/base and open (or closed). Labels and draft state
@@ -192,6 +194,8 @@ class FakeGitHub:
     def paginate(self, path, limit=1000):
         if path.endswith("/comments"):
             return [dict(c) for c in self.comments.get(self._num(path, 5), [])][:limit]
+        if path == "/repos/up/repo/labels":
+            return [dict(lb) for lb in self.repo_labels.values()]
         return []
 
     def page(self, path):
@@ -230,7 +234,10 @@ class FakeGitHub:
             self.labels.setdefault(self._num(path, 5), set()).update(body["labels"])
             return {}
         if path.endswith("/labels"):
-            raise GitHubError(422, "exists")
+            if body["name"] in self.repo_labels:
+                raise GitHubError(422, "already_exists")
+            self.repo_labels[body["name"]] = dict(body)
+            return dict(body)
         if path.endswith("/comments"):
             n = self._num(path, 5)
             c = {"id": self.next_id, "user": {"login": "github-actions[bot]"}, "body": body["body"],
@@ -247,6 +254,9 @@ class FakeGitHub:
                 for c in cs:
                     if c["id"] == cid:
                         c["body"] = body["body"]
+            return {}
+        if "/labels/" in path:
+            self.repo_labels[urllib.parse.unquote(path.rsplit("/", 1)[1])].update(body)
             return {}
         if "/pulls/" in path and body.get("state") == "closed":
             self.closed.add(self._num(path, 5))
@@ -737,6 +747,17 @@ def test_deleted_fork_closes_only_prs_that_need_a_review():
     # a new pull request from a fork that's already gone
     gh = FakeGitHub()
     assert gate(gh).process(no_fork(), action="opened") == "closed-no-fork" and 7 in gh.closed
+
+
+def test_labels_are_created_with_descriptions():
+    gh = FakeGitHub()
+    gh.repo_labels["bouncer:pass"] = {"name": "bouncer:pass", "color": "123456", "description": ""}  # from an older version
+    gh.repo_labels["bouncer:fail"] = {"name": "bouncer:fail", "color": "000000", "description": "Ours"}
+    gate(gh).process(make_pr(), action="opened")
+    assert {n: lb["description"] for n, lb in gh.repo_labels.items()} == {
+        "bouncer:pending": "Waiting for the author's bouncer review", "bouncer:pass": "Passed the bouncer review",
+        "bouncer:fail": "Ours", "bouncer:skip": "Skips the bouncer review"}
+    assert gh.repo_labels["bouncer:pass"]["color"] == "123456"
 
 
 def test_exempt_authors_untouched():

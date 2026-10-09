@@ -25,7 +25,12 @@ from .render import (STALE_NOTES, clean, find_state, fmt_deadline, instructions,
                      plural, review_markdown, state_block, status_text)
 
 L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
-LABEL_COLORS = {L_PENDING: "fbca04", L_PASS: "0e8a16", L_FAIL: "b60205", L_SKIP: "c5def5"}
+LABELS = {  # name: (color, description)
+    L_PENDING: ("fbca04", "Waiting for the author's bouncer review"),
+    L_PASS: ("0e8a16", "Passed the bouncer review"),
+    L_FAIL: ("b60205", "Bounced by the bouncer review"),
+    L_SKIP: ("c5def5", "Skips the bouncer review"),
+}
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 # Why a signed review didn't count (state "stale", see Gate._stale), as the state's "note" for the CLI.
 STALE_STATE_NOTES = {"config": "config_changed", "protocol": "outdated"}
@@ -144,14 +149,20 @@ class Gate:
 
     # --- GitHub helpers ---------------------------------------------------
     def _ensure_labels(self) -> None:
+        """Create the bouncer's labels, with descriptions, once per run. Existing labels without a
+        description get one; a maintainer's own color or description is left alone."""
         if self._labels_ready:
             return
-        for name, color in LABEL_COLORS.items():
-            try:
-                self.gh.post(f"/repos/{self.repo}/labels", {"name": name, "color": color})
-            except GitHubError as e:
-                if e.status != 422:
-                    raise
+        have = {lb.get("name"): lb for lb in self.gh.paginate(f"/repos/{self.repo}/labels", limit=1000)}
+        for name, (color, description) in LABELS.items():
+            if name not in have:
+                try:
+                    self.gh.post(f"/repos/{self.repo}/labels", {"name": name, "color": color, "description": description})
+                except GitHubError as e:
+                    if e.status != 422:  # 422: created meanwhile
+                        raise
+            elif not have[name].get("description"):
+                self.gh.patch(f"/repos/{self.repo}/labels/{urllib.parse.quote(name, safe='')}", {"description": description})
         self._labels_ready = True
 
     def _add_label(self, n: int, name: str) -> None:
