@@ -24,11 +24,12 @@ from pathlib import Path
 
 from . import config as config_mod
 from .agent import Agent, ReviewFailed, Workspace, verify_evidence
-from .common import REVIEW_PROTOCOL, SCHEMA_VERSION, GitHub, GitHubError, subject_digest, subject_name
+from .common import (L_PASS, L_PENDING, L_SKIP, REVIEW_PROTOCOL, SCHEMA_VERSION, GitHub, GitHubError, subject_digest,
+                     subject_name)
 from .decide import decide
 from .facts import gather
 from .prompt import SYSTEM, build_user_content
-from .render import review_markdown
+from .render import find_state, review_markdown
 
 MAX_DIFF = 150_000
 CONFIG_COPY = "config.yml"  # the .bouncer.yml text the review used, for `report`
@@ -105,7 +106,8 @@ def cmd_resolve(args, sleep=time.sleep) -> None:
 
     Manual runs fail loudly with instructions. Automatic runs (on push) exit quietly
     whenever there is nothing to do, so contributors never get failure emails from
-    pushes that have no open pull request or no key configured.
+    pushes that have no open pull request or no key configured, and aren't billed for
+    reviews the bouncer isn't asking for.
     """
     gh = GitHub()
     me = os.environ["GITHUB_REPOSITORY"]
@@ -167,8 +169,34 @@ def cmd_resolve(args, sleep=time.sleep) -> None:
             pr = gh.get(f"/repos/{parent}/pulls/{n}")
         if pr["head"]["sha"] != pushed:  # checked after the last fetch too
             skip(f"{parent}#{n} hasn't picked up commit {pushed[:12]} yet. Push again or run the review manually.")
+        if not _waiting_for_review(gh, parent, pr, sleep):
+            # Nobody needs this review (passed, skipped, a draft, out of attempts...), so it isn't
+            # billed to the contributor's key. A manual run still reviews.
+            skip(f"{parent}#{n} isn't waiting for a bouncer review, so this push isn't reviewed and nothing is "
+                 "billed to your key. To review it anyway, run gh bouncer.")
 
     _out(skip="false", pr=n, upstream=parent, head_repo=me, base_sha=pr["base"]["sha"], head_sha=pr["head"]["sha"])
+
+
+def _waiting_for_review(gh: GitHub, upstream: str, pr: dict, sleep) -> bool:
+    """Whether the bouncer is asking for a review of the pull request's current commit.
+
+    The gate reacts to the same push, at about the time this run starts, so it gets up to two
+    minutes to catch up: its state comment then names this commit, and says whether a review is
+    pending. If it never does (no gate upstream, say), the labels decide: bouncer:pending, and
+    neither bouncer:skip nor bouncer:pass."""
+    n, sha = pr["number"], pr["head"]["sha"]
+    for attempt in range(13):
+        labels = {lb.get("name") for lb in pr.get("labels") or []}
+        if L_SKIP in labels:
+            return False
+        state = find_state(gh, upstream, n)[1] or {}
+        if state.get("sha") == sha:
+            return state.get("status") == "pending"
+        if attempt < 12:
+            sleep(10)
+            pr = gh.get(f"/repos/{upstream}/pulls/{n}")
+    return L_PENDING in labels and not labels & {L_SKIP, L_PASS}
 
 
 def _head_repo(pr: dict) -> str:

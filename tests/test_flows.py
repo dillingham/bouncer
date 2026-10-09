@@ -13,7 +13,7 @@ from bouncer import config
 from bouncer.agent import Agent, ReviewFailed, Workspace
 from bouncer.common import REVIEW_PROTOCOL, GitHubError
 from bouncer.gate import Found, Gate, VerifyError, gh_verifier
-from bouncer.render import parse_state
+from bouncer.render import parse_state, state_block
 
 
 # --- agent -------------------------------------------------------------------
@@ -1093,17 +1093,30 @@ def test_action_identity_from_runner_path():
 
 # --- resolve: manual vs automatic runs -------------------------------------------
 class ResolveGH:
-    def __init__(self, prs, pr_by_number=None, fork=True):
+    """The fork me/repo of up/repo. `states` is what the gate's state comment says on each read
+    (None: no comment); by default the gate is waiting for a review of the PR's current head."""
+
+    def __init__(self, prs, pr_by_number=None, fork=True, states=None):
         self.prs, self.by_n, self.fork, self.calls = prs, pr_by_number or {}, fork, []
+        self.states, self.last = states, None
 
     def get(self, path, accept=None):
         self.calls.append(path)
         if path == "/repos/me/repo":
             return {"fork": self.fork, "parent": {"full_name": "up/repo"}}
         if "/pulls?" in path:
+            self.last = (self.prs or [None])[0]
             return self.prs
         n = int(path.rsplit("/", 1)[1])
-        return self.by_n[n].pop(0) if isinstance(self.by_n[n], list) else self.by_n[n]
+        self.last = self.by_n[n].pop(0) if isinstance(self.by_n[n], list) else self.by_n[n]
+        return self.last
+
+    def page(self, path):
+        self.calls.append(path)
+        state = self.states.pop(0) if self.states else (
+            None if self.states is not None else {"sha": self.last["head"]["sha"], "status": "pending"})
+        body = state_block(state) if state else "hi"
+        return [{"id": 1, "user": {"login": "github-actions[bot]"}, "body": body}], {}
 
     def get_or_none(self, path, accept=None):
         try:
@@ -1112,8 +1125,9 @@ class ResolveGH:
             return None
 
 
-def _pr(n=3, sha="s1", state="open", head="me/repo"):
-    return {"number": n, "state": state, "head": {"sha": sha, "repo": {"full_name": head}}, "base": {"sha": "b"}}
+def _pr(n=3, sha="s1", state="open", head="me/repo", labels=()):
+    return {"number": n, "state": state, "head": {"sha": sha, "repo": {"full_name": head}}, "base": {"sha": "b"},
+            "labels": [{"name": x} for x in labels]}
 
 
 def run_resolve(monkeypatch, tmp_path, gh, event, pr_arg="", key="k", sha="s1", ref="feature", upstream=""):
@@ -1185,3 +1199,28 @@ def test_resolve_fork_of_a_fork(monkeypatch, tmp_path, pr_arg, upstream):
 def test_resolve_rejects_a_malformed_upstream(monkeypatch, tmp_path, capsys):
     code, out = run_resolve(monkeypatch, tmp_path, ResolveGH([_pr()]), "workflow_dispatch", upstream="up/repo/../x")
     assert code == 1 and "owner/repo" in capsys.readouterr().out
+
+
+def test_push_reviews_only_what_the_bouncer_is_waiting_for(monkeypatch, tmp_path):
+    def run(gh, event="push"):
+        return run_resolve(monkeypatch, tmp_path, gh, event, sha="new")[1]
+
+    pending = {"sha": "new", "status": "pending"}
+    # the gate already asked for a review of this commit
+    assert run(ResolveGH([_pr(sha="new", labels=["bouncer:pending"])], states=[pending]))["skip"] == "false"
+    # it passed before; the gate catches up with the push a little later and asks for a new review
+    gh = ResolveGH([_pr(sha="new", labels=["bouncer:pass"])], {3: [_pr(sha="new", labels=["bouncer:pass"])] * 2},
+                   states=[{"sha": "old", "status": "pass"}] * 2 + [pending])
+    assert run(gh)["skip"] == "false"
+    # nobody needs this one: passed and not re-reviewed, a draft, out of attempts, skipped
+    for status in ("pass", "draft", "exhausted", "override"):
+        assert run(ResolveGH([_pr(sha="new")], states=[{"sha": "new", "status": status}])) == {"skip": "true"}
+    gh = ResolveGH([_pr(sha="new", labels=["bouncer:skip"])], states=[pending])
+    assert run(gh) == {"skip": "true"} and not any("/comments" in c for c in gh.calls)
+    # the gate never catches up: the labels decide
+    stuck = [None] * 13
+    assert run(ResolveGH([_pr(sha="new", labels=["bouncer:pending"])], {3: _pr(sha="new", labels=["bouncer:pending"])},
+                         states=list(stuck)))["skip"] == "false"
+    assert run(ResolveGH([_pr(sha="new")], {3: _pr(sha="new")}, states=list(stuck))) == {"skip": "true"}
+    # a manual run always reviews
+    assert run(ResolveGH([_pr(sha="new")], states=[{"sha": "new", "status": "pass"}]), "workflow_dispatch")["skip"] == "false"

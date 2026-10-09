@@ -19,12 +19,12 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import config as config_mod
-from .common import MIN_REVIEW_PROTOCOL, PREDICATE_TYPE, GitHub, GitHubError, subject_name
+from .common import (L_FAIL, L_PASS, L_PENDING, L_SKIP, MIN_REVIEW_PROTOCOL, PREDICATE_TYPE, GitHub, GitHubError,
+                     subject_name)
 from .decide import brief, decide
 from .render import (STALE_NOTES, clean, find_state, fmt_deadline, instructions, next_steps, parse_state,
                      plural, review_markdown, state_block, status_text)
 
-L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
 LABELS = {  # name: (color, description)
     L_PENDING: ("fbca04", "Waiting for the author's bouncer review"),
     L_PASS: ("0e8a16", "Passed the bouncer review"),

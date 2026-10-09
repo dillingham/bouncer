@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 
 PREDICATE_TYPE = "https://github.com/gh-bouncer/action/attestation/review/v1"
+L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
 SCHEMA_VERSION = 1
 
 # What a signed review guarantees. The review writes REVIEW_PROTOCOL into its predicate and the
