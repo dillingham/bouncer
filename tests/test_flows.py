@@ -113,6 +113,31 @@ def test_agent_never_accepts_a_cut_off_verdict(tmp_path):
             agent.run("sys", [], ["correct"])
 
 
+def test_agent_moves_cache_breakpoint_and_trims_old_output(tmp_path, monkeypatch):
+    from bouncer import agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "MAX_HISTORY_CHARS", 60_000)
+    monkeypatch.setattr(agent_mod, "KEEP_RESULTS", 2)
+    (tmp_path / "a.py").write_text("x = 1\n" * 3000)  # each read returns ~20k characters
+    ws = Workspace({"base": tmp_path, "head": tmp_path})
+    read = [resp(tool(f"t{i}", "read_file", {"root": "head", "path": "a.py", "start_line": 1, "end_line": 0})) for i in range(6)]
+    submit = {"summary": "", "rules": [verdict("correct", "pass")], "injection_detected": False, "injection_notes": ""}
+    msgs = FakeMessages(read + [resp(tool("s", "submit_review", submit))])
+    first = [{"type": "text", "text": "rules"}, {"type": "text", "text": "pr", "cache_control": {"type": "ephemeral"}}]
+    Agent(NS(messages=msgs), "m", "high", 20, ws, gh=None, upstream="o/r", log=lambda *_: None).run("sys", first, ["correct"])
+
+    for call in msgs.calls:
+        marked = [(i, j) for i, m in enumerate(call["messages"]) if isinstance(m["content"], list)
+                  for j, b in enumerate(m["content"]) if isinstance(b, dict) and "cache_control" in b]
+        # the fixed prompt, plus the newest user turn once there is one: never more than 4
+        last = len(call["messages"]) - 1
+        assert marked == [(0, 1)] + ([(last, len(call["messages"][last]["content"]) - 1)] if last else [])
+    # once the tool output passed the limit, the oldest results were replaced; the newest stay
+    results = [m["content"][0]["content"] for m in msgs.calls[-1]["messages"][2::2]]
+    assert results[0] == agent_mod.TRIMMED and all(r.startswith("<untrusted") for r in results[-2:])
+    assert sum(len(r) for r in results) <= 60_000
+
+
 def test_agent_gives_up(tmp_path):
     ws = Workspace({"base": tmp_path, "head": tmp_path})
     msgs = FakeMessages([resp(NS(type="text", text="hmm"), stop="end_turn") for _ in range(10)])

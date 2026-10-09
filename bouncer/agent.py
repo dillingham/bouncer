@@ -14,6 +14,11 @@ from pathlib import Path
 from .common import GitHub, GitHubError, untrusted
 
 MAX_TOOL_OUTPUT = 20_000
+# Tool output kept in the conversation. Past this, the oldest large results are replaced by a
+# note so a long review stays inside the context window (next to a diff of up to 150k chars).
+MAX_HISTORY_CHARS = 250_000
+KEEP_RESULTS = 8  # the newest tool results are never trimmed
+TRIMMED = "(output removed to keep the review inside the context window; call the tool again if you need it)"
 ROOTS = ["base", "head"]
 
 
@@ -304,6 +309,8 @@ class Agent:
         while True:
             if self.usage.turns >= self.max_turns + 2:
                 raise ReviewFailed("the reviewer did not submit a verdict within the turn budget")
+            _trim_history(messages)
+            _move_cache_breakpoint(messages)
             resp = self._create(system, messages)
             self.usage.turns += 1
             self.usage.add(resp.usage)
@@ -351,11 +358,47 @@ class Agent:
             messages.append({"role": "user", "content": results})
 
 
-def _add_text(message: dict, text: str) -> None:
-    """Append a text block to a user message (content as a string or a list of blocks)."""
+def _blocks(message: dict) -> list:
+    """A user message's content as a list of blocks (it may have been built as a plain string)."""
     if isinstance(message["content"], str):
         message["content"] = [{"type": "text", "text": message["content"]}]
-    message["content"].append({"type": "text", "text": text})
+    return message["content"]
+
+
+def _add_text(message: dict, text: str) -> None:
+    _blocks(message).append({"type": "text", "text": text})
+
+
+def _move_cache_breakpoint(messages: list) -> None:
+    """Put a cache breakpoint on the newest user turn and take it off older ones, so each turn
+    reads the conversation so far from the cache instead of paying for all of it again.
+
+    The first message keeps its own breakpoint (the fixed prompt). The API finds the previous
+    turn's cached prefix from the new breakpoint by itself (it looks back up to 20 blocks), so
+    at most two of the four allowed breakpoints are in use."""
+    for m in messages[1:]:
+        if m["role"] == "user":
+            for b in _blocks(m):
+                b.pop("cache_control", None)
+    if len(messages) > 1 and messages[-1]["role"] == "user":
+        _blocks(messages[-1])[-1]["cache_control"] = {"type": "ephemeral"}
+
+
+def _trim_history(messages: list) -> None:
+    """Keep the tool output in the conversation under MAX_HISTORY_CHARS by replacing the oldest
+    large results with a note. It trims down to half the limit at once: every trim changes the
+    prompt from that point on, so it costs one cache miss and shouldn't happen every turn."""
+    results = [b for m in messages[1:] if m["role"] == "user" for b in _blocks(m)
+               if b.get("type") == "tool_result" and isinstance(b.get("content"), str)]
+    total = sum(len(b["content"]) for b in results)
+    if total <= MAX_HISTORY_CHARS:
+        return
+    for b in results[:-KEEP_RESULTS]:
+        if total <= MAX_HISTORY_CHARS // 2:
+            break
+        if len(b["content"]) > len(TRIMMED):
+            total -= len(b["content"]) - len(TRIMMED)
+            b["content"] = TRIMMED
 
 
 def missing_rules(raw: dict, rule_ids: list[str]) -> list[str]:
