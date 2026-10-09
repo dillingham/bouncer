@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import config as config_mod
-from .common import PREDICATE_TYPE, GitHub, GitHubError, subject_name
+from .common import MIN_REVIEW_PROTOCOL, PREDICATE_TYPE, GitHub, GitHubError, subject_name
 from .decide import decide
 from .render import STALE_NOTES, clean, instructions, parse_state, review_markdown, state_block
 
@@ -201,6 +201,12 @@ class Gate:
 
     def _stale(self, predicate: dict) -> str | None:
         """Why a signed review of the right commit doesn't count, or None if it does."""
+        try:
+            protocol = int(predicate.get("protocol") or 0)
+        except (TypeError, ValueError):
+            protocol = 0
+        if protocol < MIN_REVIEW_PROTOCOL:
+            return "protocol"  # made by an outdated version of the review
         if predicate.get("config_digest") != self.cfg.digest:
             return "config"  # made with other settings than the maintainers' current ones
         return None

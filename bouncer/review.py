@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import config as config_mod
 from .agent import Agent, ReviewFailed, Workspace, verify_evidence
-from .common import SCHEMA_VERSION, GitHub, GitHubError, subject_digest, subject_name
+from .common import REVIEW_PROTOCOL, SCHEMA_VERSION, GitHub, GitHubError, subject_digest, subject_name
 from .decide import decide
 from .facts import gather
 from .prompt import SYSTEM, build_user_content
@@ -187,6 +187,7 @@ def cmd_run(args) -> None:
     name = subject_name(upstream, pr_n, args.head_sha)
     predicate = {
         "schema": SCHEMA_VERSION,
+        "protocol": REVIEW_PROTOCOL,
         "upstream": upstream,
         "pr": pr_n,
         "head_repo": args.head_repo,

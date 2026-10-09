@@ -7,7 +7,7 @@ import pytest
 
 from bouncer import config
 from bouncer.agent import Agent, ReviewFailed, Workspace
-from bouncer.common import GitHubError
+from bouncer.common import REVIEW_PROTOCOL, GitHubError
 from bouncer.gate import Found, Gate
 from bouncer.render import parse_state
 
@@ -165,13 +165,13 @@ def make_pr(n=7, sha="a" * 40, assoc="NONE", labels=(), draft=False, author="dri
             "base": {"ref": base, "repo": {"full_name": "up/repo", "default_branch": "main"}}}
 
 
-def found(outcome, sha="a" * 40, n=7, ts=1, digest=None):
+def found(outcome, sha="a" * 40, n=7, ts=1, digest=None, protocol=REVIEW_PROTOCOL):
     rules = [{"id": r.id, "result": "fail" if outcome == "fail" and r.id == "correct" else "pass", "confidence": 0.95,
               "reason": "breaks x", "evidence": [{"root": "head", "path": "a.py", "line": 1, "quote": "x", "verified": True}]}
              for r in config.parse("").rules]
     return Found(ts=ts, run="https://github.com/fork/repo/actions/runs/1", predicate={
         "upstream": "Up/Repo", "pr": n, "head_sha": sha, "head_repo": "fork/repo", "base_sha": "b" * 40,
-        "config_digest": digest or config.parse("").digest,
+        "protocol": protocol, "config_digest": digest or config.parse("").digest,
         "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": 1, "turns": 1},
         "facts": {"linked_issues": [{"number": 1, "state": "open"}], "changed_files": [], "changed_lines": 1},
         "review": {"summary": "s", "rules": rules, "injection_detected": False, "injection_notes": ""}})
@@ -222,6 +222,19 @@ def test_review_with_other_settings_does_not_count():
     assert "changed the bouncer settings after it ran" in body and "gh bouncer https://github.com/up/repo/pull/7" in body
     assert len(gh.bodies(7)) == 1  # said in the instructions comment, not a new one
     # the run after the settings changed counts, even though the stale one was first
+    assert gate(gh, verifier=lambda r, s: [old, found("pass", ts=2)]).process(make_pr()) == "pass"
+
+
+def test_review_from_outdated_version_does_not_count():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    old = found("fail")
+    del old.predicate["protocol"]  # written before protocols existed
+    for stale in ([old], [found("fail", protocol=REVIEW_PROTOCOL - 1)], [found("fail", protocol="x")]):
+        assert gate(gh, verifier=lambda r, s: stale).process(make_pr()) == "pending"
+    st = gh.state(7)
+    assert st["status"] == "pending" and st["fails"] == 0 and st["stale"] == "protocol"
+    assert "outdated version of the bouncer review" in gh.bodies(7)[0] and len(gh.bodies(7)) == 1
     assert gate(gh, verifier=lambda r, s: [old, found("pass", ts=2)]).process(make_pr()) == "pass"
 
 
@@ -377,7 +390,7 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
     p = json.loads((out / "predicate.json").read_text())
     assert p["model"] == "claude-sonnet-5-5" and msgs.calls[0]["model"] == "claude-sonnet-5-5"
     assert msgs.calls[0]["output_config"] == {"effort": "medium"}
-    assert p["config_digest"] == config.parse(upstream_cfg).digest
+    assert p["config_digest"] == config.parse(upstream_cfg).digest and p["protocol"] == REVIEW_PROTOCOL
     assert p["review"]["rules"][[r["id"] for r in p["review"]["rules"]].index("correct")]["evidence"][0]["verified"] is True
     name = subject_name("Up/Repo", 5, sha)
     outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())

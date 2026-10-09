@@ -30,6 +30,7 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
 | Run it on their own machine or a self-hosted runner | Verified with `--deny-self-hosted-runners`. |
 | Pick a cheap model, lower effort, or soften the rules | Model, effort and rules come from the upstream `.bouncer.yml`; the workflow has no inputs for them. |
 | Get reviewed under older or weaker settings | The review signs a digest of the settings it used, and the gate only accepts reviews made with its current settings. |
+| Run an older version of the review, from before a fix | Each review signs the protocol version of the code that ran; the gate ignores reviews below the version it requires. |
 | Point the API at a fake endpoint | The base URL is hardcoded. |
 | Re-run until the model says yes | Every run for the same PR commit attests the same subject. The gate lists all of them and only honors the earliest. |
 | Cancel runs heading for a bounce before they're signed | Nothing in the run (logs, summary, outputs) shows the verdict until the attestation exists. |
@@ -53,7 +54,7 @@ Prefer to do it by hand? Copy `templates/bouncer.yml` to `.github/workflows/boun
 
 The gate's comment has one instruction: install the extension and run `gh bouncer <pr-url>`. It turns on the review in their fork, stores their key as a fork secret (asking the first time), runs the review and reports back on the PR. After that, every push to the PR branch is reviewed automatically; pushes with no open PR, or forks without a key, exit quietly. The key never leaves their fork's secrets, and the report shows how many tokens their review used.
 
-If the maintainers change the review settings (model, effort, turns, guidance or rules) after a review ran, that review no longer counts: the gate's comment says so and asks the contributor to run `gh bouncer` again. That doesn't use up a review round.
+If the maintainers change the review settings (model, effort, turns, guidance or rules) after a review ran, or the review was made with an outdated version of bouncer, it doesn't count: the gate's comment says so and asks the contributor to run `gh bouncer` again. That doesn't use up a review round.
 
 ## Before trusting it on a busy repo
 

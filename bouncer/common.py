@@ -13,6 +13,15 @@ import urllib.request
 PREDICATE_TYPE = "https://github.com/gh-bouncer/action/attestation/review/v1"
 SCHEMA_VERSION = 1
 
+# What a signed review guarantees. The review writes REVIEW_PROTOCOL into its predicate and the
+# gate ignores reviews below MIN_REVIEW_PROTOCOL. The predicate is written by the review code at
+# whatever ref ran, so an older review.yml can't claim a newer protocol. Bump both when a fix to
+# the review must not be bypassed by running an older version of it.
+#   1 (no field): the original review
+#   2: verdict hidden until signed, settings digest checked, skipped hard rules fail
+REVIEW_PROTOCOL = 2
+MIN_REVIEW_PROTOCOL = 2
+
 
 def subject_name(upstream: str, pr: int, head_sha: str) -> str:
     """Deterministic subject both sides can compute.

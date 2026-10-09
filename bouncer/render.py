@@ -88,6 +88,9 @@ def parse_state(comments: list[dict]) -> tuple[dict | None, dict | None]:
 STALE_NOTES = {
     "config": "Your signed review doesn't count: the maintainers changed the bouncer settings after it ran. "
               "Run the review again with the command below. This doesn't use up a review round.",
+    "protocol": "Your signed review doesn't count: it was made with an outdated version of the bouncer review. "
+                "Run the review again with the command below. If this note comes back, sync your fork's default "
+                "branch with this repository first. This doesn't use up a review round.",
 }
 
 
