@@ -148,8 +148,10 @@ def cmd_run(args) -> None:
         fail("The pull request changed while the review was starting. Run the workflow again.")
 
     base_dir, head_dir = Path(args.base_dir), Path(args.head_dir)
-    cfg_path = base_dir / ".bouncer.yml"
-    cfg_text = cfg_path.read_text("utf-8") if cfg_path.is_file() else ""
+    # The copy the gate reads (the default branch), not the PR's base checkout: the gate only
+    # accepts reviews made with its current settings, and GitHub doesn't move a PR's base sha
+    # when the base branch moves, so a base-sha copy could stay stale however often it's re-run.
+    cfg_text = config_mod.fetch_text(gh, upstream)
     try:
         cfg = config_mod.parse(cfg_text)
     except config_mod.ConfigError as e:

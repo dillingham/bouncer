@@ -165,12 +165,13 @@ def make_pr(n=7, sha="a" * 40, assoc="NONE", labels=(), draft=False, author="dri
             "base": {"ref": base, "repo": {"full_name": "up/repo", "default_branch": "main"}}}
 
 
-def found(outcome, sha="a" * 40, n=7, ts=1):
+def found(outcome, sha="a" * 40, n=7, ts=1, digest=None):
     rules = [{"id": r.id, "result": "fail" if outcome == "fail" and r.id == "correct" else "pass", "confidence": 0.95,
               "reason": "breaks x", "evidence": [{"root": "head", "path": "a.py", "line": 1, "quote": "x", "verified": True}]}
              for r in config.parse("").rules]
     return Found(ts=ts, run="https://github.com/fork/repo/actions/runs/1", predicate={
         "upstream": "Up/Repo", "pr": n, "head_sha": sha, "head_repo": "fork/repo", "base_sha": "b" * 40,
+        "config_digest": digest or config.parse("").digest,
         "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": 1, "turns": 1},
         "facts": {"linked_issues": [{"number": 1, "state": "open"}], "changed_files": [], "changed_lines": 1},
         "review": {"summary": "s", "rules": rules, "injection_detected": False, "injection_notes": ""}})
@@ -209,6 +210,26 @@ def test_only_matching_attestations_count():
     gate(gh).process(make_pr(), action="opened")
     wrong = [found("pass", sha="c" * 40), found("pass", n=8)]
     assert gate(gh, verifier=lambda r, s: wrong).process(make_pr()) == "pending"
+
+
+def test_review_with_other_settings_does_not_count():
+    gh = FakeGitHub()
+    gate(gh).process(make_pr(), action="opened")
+    old = found("fail", digest="sha256:" + "0" * 64)
+    assert gate(gh, verifier=lambda r, s: [old]).process(make_pr()) == "pending"
+    st, body = gh.state(7), gh.bodies(7)[0]
+    assert st["status"] == "pending" and st["fails"] == 0 and 7 not in gh.closed
+    assert "changed the bouncer settings after it ran" in body and "gh bouncer https://github.com/up/repo/pull/7" in body
+    assert len(gh.bodies(7)) == 1  # said in the instructions comment, not a new one
+    # the run after the settings changed counts, even though the stale one was first
+    assert gate(gh, verifier=lambda r, s: [old, found("pass", ts=2)]).process(make_pr()) == "pass"
+
+
+def test_settings_digest_ignores_gate_only_settings():
+    gh = FakeGitHub()
+    cfg = "gate: {deadline_hours: 72}\nchecks: {max_changed_lines: 500}"
+    gate(gh, cfg_text=cfg).process(make_pr(), action="opened")
+    assert gate(gh, verifier=lambda r, s: [found("pass")], cfg_text=cfg).process(make_pr()) == "pass"
 
 
 def test_deadline_expires():
@@ -311,7 +332,9 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
     for d in (base, head):
         (d / "src").mkdir(parents=True)
         (d / "src/a.py").write_text("def f():\n    return 1\n")
-    (base / ".bouncer.yml").write_text("review: {model: claude-sonnet-5-5, effort: medium}\n")
+    # The settings come from the upstream default branch (what the gate reads), not the PR's base checkout.
+    upstream_cfg = "review: {model: claude-sonnet-5-5, effort: medium}\n"
+    (base / ".bouncer.yml").write_text("review: {model: claude-haiku-5-5, effort: low}\n")
     sha = "f" * 40
     pr = {"number": 5, "title": "Fix f", "body": "Fixes #1", "head": {"sha": sha}, "user": {"login": "x"}}
 
@@ -322,6 +345,8 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
             return pr
 
         def get_or_none(self, path, accept=None):
+            if path == "/repos/Up/Repo/contents/.bouncer.yml":
+                return upstream_cfg
             return {"state": "open", "title": "bug", "body": "f is wrong"}
 
     monkeypatch.setattr(review_mod, "GitHub", GH)
@@ -352,6 +377,7 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
     p = json.loads((out / "predicate.json").read_text())
     assert p["model"] == "claude-sonnet-5-5" and msgs.calls[0]["model"] == "claude-sonnet-5-5"
     assert msgs.calls[0]["output_config"] == {"effort": "medium"}
+    assert p["config_digest"] == config.parse(upstream_cfg).digest
     assert p["review"]["rules"][[r["id"] for r in p["review"]["rules"]].index("correct")]["evidence"][0]["verified"] is True
     name = subject_name("Up/Repo", 5, sha)
     outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())

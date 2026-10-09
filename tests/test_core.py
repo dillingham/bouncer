@@ -50,6 +50,29 @@ def test_target_branches():
     assert config.parse("checks: {target_branches: [main, ' release/2.x ']}").target_branches == ["main", "release/2.x"]
 
 
+def test_config_digest_is_canonical():
+    text = "review:\n  model: claude-opus-5-5\n  effort: high\nguidance: |\n  No new deps.\nrules:\n  - id: a\n    description: x\n"
+    same = [
+        "# comment\n" + text.replace("  effort: high\n", "  effort: high   # inline\n"),
+        text.replace("\n", "\r\n"),
+        "rules: [{description: x, id: a, hard: true}]\nguidance: \"No new deps.\"\nreview: {effort: high, model: claude-opus-5-5}\n",
+        text + "gate: {deadline_hours: 5, fail_confidence: 0.5}\nchecks: {target_branches: [dev], forbidden_paths: []}\n",
+    ]
+    d = config.parse(text).digest
+    assert d.startswith("sha256:") and all(config.parse(t).digest == d for t in same)
+    assert config.parse("").digest == config.parse("version: 1\n").digest
+    changed = [
+        text.replace("effort: high", "effort: low"),
+        text.replace("claude-opus-5-5", "claude-sonnet-5-5"),
+        text.replace("No new deps.", "No new deps!"),
+        text.replace("description: x", "description: y"),
+        text + "    hard: false\n",
+        text + "  - id: b\n    description: z\n",
+        text.replace("review:\n", "review:\n  max_turns: 9\n"),
+    ]
+    assert len({config.parse(t).digest for t in changed} | {d}) == len(changed) + 1
+
+
 def test_effort_sets_turn_default():
     assert config.parse("review: {effort: low}").max_turns == 12
     assert config.parse("review: {effort: low, max_turns: 7}").max_turns == 7

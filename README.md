@@ -12,7 +12,7 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
 
 1. **Someone outside the team opens a PR.** The gate (in the maintainer's repo) labels it `bouncer:pending`, converts it to a draft, and comments with instructions and a deadline. A PR into a branch outside `checks.target_branches` (default: only the default branch) is bounced right away, without a review.
 2. **The contributor runs `gh bouncer <pr-url>`.** It sets up their fork and stores their key as a fork secret the first time, then runs the review there. The review:
-   - reads `.bouncer.yml` from the upstream base branch (model, effort, rules: all maintainer-controlled),
+   - reads `.bouncer.yml` from the upstream default branch, the same copy the gate uses (model, effort, rules: all maintainer-controlled),
    - checks out the base branch and the PR head **read-only** (PR code is never executed),
    - runs an agent that reads the touched files in full, greps for callers and APIs, checks existing tests, searches past issues and PRs for duplicates and declines, and evaluates every rule with file/line evidence,
    - verifies every piece of evidence against the actual files (quotes that don't match are discarded),
@@ -29,6 +29,7 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
 | Edit the review workflow in their fork | The gate only accepts attestations signed by `gh-bouncer/action/.github/workflows/review.yml`, so a modified workflow signs with the wrong identity. |
 | Run it on their own machine or a self-hosted runner | Verified with `--deny-self-hosted-runners`. |
 | Pick a cheap model, lower effort, or soften the rules | Model, effort and rules come from the upstream `.bouncer.yml`; the workflow has no inputs for them. |
+| Get reviewed under older or weaker settings | The review signs a digest of the settings it used, and the gate only accepts reviews made with its current settings. |
 | Point the API at a fake endpoint | The base URL is hardcoded. |
 | Re-run until the model says yes | Every run for the same PR commit attests the same subject. The gate lists all of them and only honors the earliest. |
 | Cancel runs heading for a bounce before they're signed | Nothing in the run (logs, summary, outputs) shows the verdict until the attestation exists. |
@@ -51,6 +52,8 @@ Prefer to do it by hand? Copy `templates/bouncer.yml` to `.github/workflows/boun
 ## Contributor experience
 
 The gate's comment has one instruction: install the extension and run `gh bouncer <pr-url>`. It turns on the review in their fork, stores their key as a fork secret (asking the first time), runs the review and reports back on the PR. After that, every push to the PR branch is reviewed automatically; pushes with no open PR, or forks without a key, exit quietly. The key never leaves their fork's secrets, and the report shows how many tokens their review used.
+
+If the maintainers change the review settings (model, effort, turns, guidance or rules) after a review ran, that review no longer counts: the gate's comment says so and asks the contributor to run `gh bouncer` again. That doesn't use up a review round.
 
 ## Before trusting it on a busy repo
 

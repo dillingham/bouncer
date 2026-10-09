@@ -84,12 +84,20 @@ def parse_state(comments: list[dict]) -> tuple[dict | None, dict | None]:
     return None, None
 
 
+# Why a signed review of the current commit doesn't count (see Gate._stale), for the contributor.
+STALE_NOTES = {
+    "config": "Your signed review doesn't count: the maintainers changed the bouncer settings after it ran. "
+              "Run the review again with the command below. This doesn't use up a review round.",
+}
+
+
 def instructions(pr: int, head_repo: str, upstream: str, deadline: str, attempts_left: int,
-                 server: str = "https://github.com") -> str:
+                 server: str = "https://github.com", note: str = "") -> str:
     url = f"{server}/{upstream}/pull/{pr}"
+    warning = f"> ⚠️ {note}\n\n" if note else ""
     return f"""### 🚪 Bouncer review required
 
-This project has an automated bouncer review outside pull requests before a maintainer looks at them. **The review runs in your fork, on your own Anthropic API key.** Maintainers pay nothing and pick it up once it passes.
+{warning}This project has an automated bouncer review outside pull requests before a maintainer looks at them. **The review runs in your fork, on your own Anthropic API key.** Maintainers pay nothing and pick it up once it passes.
 
 Run this with the [GitHub CLI](https://cli.github.com):
 

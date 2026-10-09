@@ -20,7 +20,7 @@ from typing import Callable
 from . import config as config_mod
 from .common import PREDICATE_TYPE, GitHub, GitHubError, subject_name
 from .decide import decide
-from .render import clean, instructions, parse_state, review_markdown, state_block
+from .render import STALE_NOTES, clean, instructions, parse_state, review_markdown, state_block
 
 L_PENDING, L_PASS, L_FAIL, L_SKIP = "bouncer:pending", "bouncer:pass", "bouncer:fail", "bouncer:skip"
 LABEL_COLORS = {L_PENDING: "fbca04", L_PASS: "0e8a16", L_FAIL: "b60205", L_SKIP: "c5def5"}
@@ -199,6 +199,16 @@ class Gate:
     def _deadline(self, state: dict) -> dt.datetime:
         return _parse_time(state["requested_at"]) + dt.timedelta(hours=self.cfg.deadline_hours)
 
+    def _stale(self, predicate: dict) -> str | None:
+        """Why a signed review of the right commit doesn't count, or None if it does."""
+        if predicate.get("config_digest") != self.cfg.digest:
+            return "config"  # made with other settings than the maintainers' current ones
+        return None
+
+    def _instructions(self, n: int, head_repo: str, state: dict, note: str = "") -> str:
+        return instructions(n, head_repo, self.repo, _fmt_deadline(self._deadline(state)),
+                            self.cfg.max_attempts - int(state.get("fails", 0)), self.server, note)
+
     # --- main flow ------------------------------------------------------------
     def process(self, pr: dict, action: str | None = None, sender: str | None = None) -> str:
         n = int(pr["number"])
@@ -265,9 +275,7 @@ class Gate:
                 "rounds": int(prev.get("rounds", 0)) + 1,
                 "fails": fails,
             }
-            text = instructions(n, head_repo, self.repo, _fmt_deadline(self._deadline(state)),
-                                self.cfg.max_attempts - fails, self.server)
-            sticky = self._save_state(n, sticky, text, state)
+            sticky = self._save_state(n, sticky, self._instructions(n, head_repo, state), state)
             self._set_labels(n, labels, L_PENDING)
             self._draft(pr, True)
             self.log(f"#{n}: review requested for {head_sha[:12]}")
@@ -278,16 +286,24 @@ class Gate:
             return state.get("status", "")
 
         name = subject_name(self.repo, n, head_sha)
-        found = self.verifier(head_repo, name)
-        valid = [
-            f for f in found
+        found = [
+            f for f in self.verifier(head_repo, name)
             if str(f.predicate.get("upstream", "")).lower() == self.repo.lower()
             and int(f.predicate.get("pr", -1)) == n
             and f.predicate.get("head_sha") == head_sha
             and str(f.predicate.get("head_repo", "")).lower() == head_repo.lower()
         ]
+        valid = [f for f in found if not self._stale(f.predicate)]
         if valid:
             return self._apply(pr, labels, sticky, state, valid[0], attempts=len(valid))
+        if found:
+            # Signed reviews of this commit that don't count. That's not a fail and uses no round:
+            # the contributor is asked to run it again (said once per reason).
+            why = self._stale(found[-1].predicate)
+            if state.get("stale") != why:
+                state["stale"] = why
+                self._save_state(n, sticky, self._instructions(n, head_repo, state, STALE_NOTES[why]), state)
+            self.log(f"#{n}: signed review doesn't count ({why})")
 
         if self.now >= self._deadline(state):
             state["status"] = "expired"
@@ -333,6 +349,7 @@ class Gate:
         self._comment(n, report)
         state["status"] = d.outcome
         state["run"] = f.run
+        state.pop("stale", None)
         if d.outcome == "pass":
             self._save_state(n, sticky, "### 🚪 Bouncer\n\n✅ Passed. Ready for a maintainer.", state)
             self._set_labels(n, labels, L_PASS)
@@ -383,8 +400,7 @@ class Gate:
 
 
 def load_config(gh: GitHub, repo: str) -> config_mod.Config:
-    text = gh.get_or_none(f"/repos/{repo}/contents/.bouncer.yml", accept="application/vnd.github.raw")
-    return config_mod.parse(text or "")
+    return config_mod.parse(config_mod.fetch_text(gh, repo))
 
 
 def action_identity(action_path: str) -> tuple[str, str]:

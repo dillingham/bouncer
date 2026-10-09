@@ -6,6 +6,7 @@ contributor cannot change the rules, the model or the effort level.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -95,10 +96,29 @@ class Config:
     forbidden_paths: list[str] = field(default_factory=lambda: [".github/**"])
     guidance: str = ""
     rules: list[Rule] = field(default_factory=lambda: [Rule(**r) for r in DEFAULT_RULES])
-    digest: str = ""
 
     def rule(self, rule_id: str) -> Rule | None:
         return next((r for r in self.rules if r.id == rule_id), None)
+
+    @property
+    def digest(self) -> str:
+        """Digest of the settings that shape the review itself: model, effort, turns, guidance, rules.
+
+        The review signs it and the gate only accepts reviews whose digest matches its current
+        config. It is computed from the parsed values, so comments, formatting, key order and line
+        endings don't change it. The gate applies everything else (deadlines, checks, exemptions,
+        fail_confidence) from its current config when it decides, so changing those doesn't
+        invalidate reviews. A setting that starts to affect the review must be added here.
+        """
+        review = {
+            "model": self.model,
+            "effort": self.effort,
+            "max_turns": self.max_turns,
+            "guidance": self.guidance,
+            "rules": [{"id": r.id, "hard": r.hard, "description": r.description} for r in self.rules],
+        }
+        canonical = json.dumps(review, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _get(d: dict, key: str, typ, default):
@@ -197,5 +217,10 @@ def parse(text: str | None) -> Config:
             raise ConfigError("at most 30 rules")
         cfg.rules = rules
 
-    cfg.digest = "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
     return cfg
+
+
+def fetch_text(gh, repo: str) -> str:
+    """.bouncer.yml from the repository's default branch ("" if there is none). Both the review
+    and the gate read this copy, so the review's signed config digest can match the gate's."""
+    return gh.get_or_none(f"/repos/{repo}/contents/.bouncer.yml", accept="application/vnd.github.raw") or ""
