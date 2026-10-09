@@ -30,12 +30,6 @@ Contributor-paid pull request reviews for GitHub. An outside pull request doesn'
 | Prompt-inject the reviewer through the PR | PR text is fenced as untrusted data; attempts are flagged and fail the PR; a model "fail" also needs verified evidence and the final call is made in code, not by the model. |
 | Forge a bouncer state comment | Only comments by `github-actions[bot]` are read. |
 
-## Publish it (once)
-
-1. Create a public repo, e.g. `yourname/bouncer`, and push this folder to it.
-2. Tag it: `git tag v1 && git push origin v1`.
-3. The templates already point at `dillingham/bouncer@v1`.
-
 ## Add it to a project (maintainers)
 
 1. Copy `templates/.github/workflows/bouncer-gate.yml` and `bouncer-review.yml` into the project's `.github/workflows/`, and `templates/.bouncer.yml` to the repo root. Edit the rules and `guidance` to match the project.
