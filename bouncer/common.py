@@ -21,8 +21,10 @@ SCHEMA_VERSION = 1
 #   1 (no field): the original review
 #   2: verdict hidden until signed, settings digest checked, skipped hard rules fail,
 #      tool output fenced as untrusted
-REVIEW_PROTOCOL = 2
-MIN_REVIEW_PROTOCOL = 2
+#   3: cut-off answers rejected, only upstream closing references count as linked issues,
+#      renamed-from paths in the facts, .git blocked by resolved path
+REVIEW_PROTOCOL = 3
+MIN_REVIEW_PROTOCOL = 3
 
 
 def subject_name(upstream: str, pr: int, head_sha: str) -> str:
