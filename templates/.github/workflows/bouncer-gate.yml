@@ -1,4 +1,4 @@
-# Bouncer gate. Copy into your repository unchanged except OWNER below.
+# Bouncer gate. Copy into your repository unchanged.
 name: Bouncer gate
 
 on:
@@ -32,4 +32,4 @@ jobs:
       issues: write
       attestations: read
       id-token: write
-    uses: OWNER/bouncer/.github/workflows/gate.yml@v1
+    uses: dillingham/bouncer/.github/workflows/gate.yml@v1
