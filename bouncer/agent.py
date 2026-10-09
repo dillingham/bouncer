@@ -296,8 +296,8 @@ class Agent:
         )
 
     def run(self, system: str, user_content: list, rule_ids: list[str]) -> dict:
-        messages: list = [{"role": "user", "content": user_content}]
-        nudged = reasked = False
+        messages: list = [{"role": "user", "content": list(user_content)}]
+        nudged = reasked = cut_off = False
         while True:
             if self.usage.turns >= self.max_turns + 2:
                 raise ReviewFailed("the reviewer did not submit a verdict within the turn budget")
@@ -306,6 +306,18 @@ class Agent:
             self.usage.add(resp.usage)
             if resp.stop_reason == "refusal":
                 raise ReviewFailed("the model declined to review this pull request")
+            if resp.stop_reason in ("max_tokens", "model_context_window_exceeded"):
+                # The answer was cut off, so a submit_review in it can be missing rules or end
+                # mid-reason. It is never accepted. Out of output tokens: drop it and ask once more,
+                # for a shorter answer. Out of context window: asking again can't help.
+                if resp.stop_reason == "max_tokens" and not cut_off:
+                    cut_off = True
+                    _add_text(messages[-1], "Your previous answer was cut off at the output limit and was discarded. "
+                                            "Answer again, more briefly.")
+                    continue
+                raise ReviewFailed("the reviewer's answer was cut off at the output limit"
+                                   if resp.stop_reason == "max_tokens" else
+                                   "the review ran out of context window before reaching a verdict")
             # Echo the assistant turn exactly as received (thinking blocks included).
             messages.append({"role": "assistant", "content": resp.content})
             tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
@@ -334,6 +346,13 @@ class Agent:
                 nudged = True
                 results.append({"type": "text", "text": "Turn budget reached. Call submit_review now; mark anything you could not establish as unsure."})
             messages.append({"role": "user", "content": results})
+
+
+def _add_text(message: dict, text: str) -> None:
+    """Append a text block to a user message (content as a string or a list of blocks)."""
+    if isinstance(message["content"], str):
+        message["content"] = [{"type": "text", "text": message["content"]}]
+    message["content"].append({"type": "text", "text": text})
 
 
 def missing_rules(raw: dict, rule_ids: list[str]) -> list[str]:

@@ -80,6 +80,24 @@ def test_agent_asks_once_for_missing_verdicts(tmp_path):
     assert logs == []  # submit_review is never logged
 
 
+def test_agent_never_accepts_a_cut_off_verdict(tmp_path):
+    ws = Workspace({"base": tmp_path, "head": tmp_path})
+    # The output budget ran out inside submit_review: partial input, no verdicts.
+    cut = resp(tool("t1", "submit_review", {"summary": "The change"}), stop="max_tokens")
+    full = {"summary": "ok", "rules": all_verdicts(), "injection_detected": False, "injection_notes": ""}
+    msgs = FakeMessages([cut, resp(tool("t2", "submit_review", full))])
+    agent = Agent(NS(messages=msgs), "m", "high", 10, ws, gh=None, upstream="o/r", log=lambda *_: None)
+    review = agent.run("sys", [{"type": "text", "text": "go"}], [r.id for r in config.parse("").rules])
+    assert len(review["rules"]) == len(full["rules"]) and agent.usage.turns == 2
+    retry = msgs.calls[1]["messages"]
+    assert len(retry) == 1 and "cut off" in retry[0]["content"][-1]["text"]  # the cut-off turn was dropped
+    # cut off twice, or out of context window: no verdict at all
+    for script in ([cut, cut], [resp(tool("t", "submit_review", full), stop="model_context_window_exceeded")]):
+        agent = Agent(NS(messages=FakeMessages(script)), "m", "high", 10, ws, gh=None, upstream="o/r", log=lambda *_: None)
+        with pytest.raises(ReviewFailed):
+            agent.run("sys", [], ["correct"])
+
+
 def test_agent_gives_up(tmp_path):
     ws = Workspace({"base": tmp_path, "head": tmp_path})
     msgs = FakeMessages([resp(NS(type="text", text="hmm"), stop="end_turn") for _ in range(10)])
