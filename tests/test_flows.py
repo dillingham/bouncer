@@ -142,6 +142,84 @@ def test_agent_moves_cache_breakpoint_and_trims_old_output(tmp_path, monkeypatch
     assert sum(len(r) for r in results) <= 60_000
 
 
+def stream_error(kind):
+    """What the SDK raises when a streamed answer ends in an error event: the stream's status was 200."""
+    import anthropic
+
+    body = {"type": "error", "error": {"type": kind, "message": kind}}
+    return anthropic.APIStatusError(str(body), response=NS(status_code=200, headers={}, request=None), body=body)
+
+
+def test_agent_asks_again_when_an_answer_is_cut_off(tmp_path):
+    import httpx2
+
+    ws = Workspace({"base": tmp_path, "head": tmp_path})
+    submit = {"summary": "ok", "rules": [verdict("correct", "pass")], "injection_detected": False, "injection_notes": ""}
+    dropped = httpx2.RemoteProtocolError("peer closed connection without sending complete message body")
+    msgs = FakeMessages([dropped, stream_error("overloaded_error"), stream_error("api_error"), resp(tool("s", "submit_review", submit))])
+    waits, logs = [], []
+    agent = Agent(NS(messages=msgs), "m", "high", 5, ws, gh=None, upstream="o/r", log=logs.append, sleep=waits.append)
+    assert agent.run("sys", [{"type": "text", "text": "go"}], ["correct"])["rules"][0]["result"] == "pass"
+    assert waits == [15, 30, 60] and agent.usage.turns == 1 and len(msgs.calls) == 4
+    assert msgs.calls[0]["messages"] == msgs.calls[3]["messages"]  # the same turn, asked again
+    assert "the connection dropped: RemoteProtocolError" in logs[0] and "overloaded_error" in logs[1]
+    # bounded: the fourth cut-off in a row is raised
+    agent = Agent(NS(messages=FakeMessages([dropped] * 4)), "m", "high", 5, ws, gh=None, upstream="o/r",
+                  log=lambda *_: None, sleep=lambda s: None)
+    with pytest.raises(httpx2.RemoteProtocolError):
+        agent.run("sys", [], ["correct"])
+    # other errors aren't asked again: the SDK already retried them, or they won't change
+    for error in (api_error(__import__("anthropic").OverloadedError, 529, "Overloaded"), stream_error("invalid_request_error")):
+        msgs = FakeMessages([error, resp(tool("s", "submit_review", submit))])
+        agent = Agent(NS(messages=msgs), "m", "high", 5, ws, gh=None, upstream="o/r", log=lambda *_: None, sleep=lambda s: None)
+        with pytest.raises(type(error)):
+            agent.run("sys", [], ["correct"])
+        assert len(msgs.calls) == 1
+
+
+def test_agent_retries_what_the_real_sdk_raises_for_a_cut_off_stream(tmp_path):
+    """The SDK (pinned in requirements.txt) streaming from a fake API: a connection dropped mid-answer,
+    then an overloaded_error event mid-answer, then a full answer."""
+    import anthropic
+    import httpx2
+
+    def sse(*events):
+        return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
+
+    start = {"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "model": "m",
+             "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 7, "output_tokens": 1}}}
+    submit = {"summary": "ok", "rules": [verdict("correct", "pass")], "injection_detected": False, "injection_notes": ""}
+    answer = sse(start,
+                 {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "s", "name": "submit_review", "input": {}}},
+                 {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(submit)}},
+                 {"type": "content_block_stop", "index": 0},
+                 {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None}, "usage": {"output_tokens": 5}},
+                 {"type": "message_stop"})
+
+    class Dropped(httpx2.SyncByteStream):
+        def __iter__(self):
+            yield sse(start)
+            raise httpx2.RemoteProtocolError("peer closed connection without sending complete message body")
+
+    replies = [lambda: httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=Dropped()),
+               lambda: httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=sse(
+                   start, {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})),
+               lambda: httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=answer)]
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return replies[len(requests) - 1]()
+
+    client = anthropic.Anthropic(api_key="sk-ant-x", base_url="https://api.anthropic.com", max_retries=4,
+                                 http_client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+    waits = []
+    agent = Agent(client, "claude-opus-5-5", "high", 5, Workspace({"base": tmp_path, "head": tmp_path}), gh=None,
+                  upstream="o/r", log=lambda *_: None, sleep=waits.append)
+    assert agent.run("sys", [{"type": "text", "text": "go"}], ["correct"])["summary"] == "ok"
+    assert len(requests) == 3 and waits == [15, 30]
+
+
 def test_agent_gives_up(tmp_path):
     ws = Workspace({"base": tmp_path, "head": tmp_path})
     msgs = FakeMessages([resp(NS(type="text", text="hmm"), stop="end_turn") for _ in range(10)])
@@ -1176,6 +1254,28 @@ def test_review_api_errors_are_explained(review_run, capsys, error, says):
     line = next(x for x in out.splitlines() if x.startswith("::error::"))
     assert e.value.code == 1 and "Traceback" not in out and not (review_run.out / "predicate.json").exists()
     assert says in line and line.endswith(NOT_COUNTED)
+
+
+@pytest.mark.parametrize("error,says", [
+    ("dropped", f"The connection to Anthropic's API dropped partway through an answer, even after asking again. Try "
+                f"again in a few minutes: gh bouncer {URL}"),
+    ("overloaded_error", f"Anthropic's API was overloaded partway through an answer, even after asking again. Try "
+                         f"again in a few minutes: gh bouncer {URL}"),
+    ("api_error", "Anthropic's API had an error partway through an answer, even after asking again."),
+])
+def test_review_cut_off_too_often_is_explained(review_run, capsys, monkeypatch, error, says):
+    import httpx2
+
+    from bouncer import agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "STREAM_RETRY_WAIT", 0)
+    cut = httpx2.ReadError("connection reset") if error == "dropped" else stream_error(error)
+    with pytest.raises(SystemExit) as e:
+        review_run([cut] * (agent_mod.STREAM_RETRIES + 1))
+    out = capsys.readouterr().out
+    line = next(x for x in out.splitlines() if x.startswith("::error::"))
+    assert e.value.code == 1 and "Traceback" not in out and not (review_run.out / "predicate.json").exists()
+    assert says in line and line.endswith(NOT_COUNTED) and "(200)" not in line
 
 
 @pytest.mark.parametrize("script,says", [

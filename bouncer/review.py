@@ -23,7 +23,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import config as config_mod
-from .agent import Agent, ReviewFailed, Workspace, verify_evidence
+from .agent import Agent, ReviewFailed, Workspace, stream_error_type, verify_evidence
 from .common import (L_PASS, L_PENDING, L_SKIP, REVIEW_PROTOCOL, SCHEMA_VERSION, GitHub, GitHubError, subject_digest,
                      subject_name)
 from .decide import decide
@@ -67,12 +67,22 @@ def review_failed_message(e: ReviewFailed, url: str, max_turns: int) -> str:
 
 
 def api_error_message(e: Exception, url: str, model: str) -> str:
-    """An Anthropic API error, after the client's own retries, as something the contributor can act on."""
+    """An Anthropic API error, after the client's own retries (and the agent's, for an answer cut
+    off partway), as something the contributor can act on."""
     import anthropic
+    import httpx2
 
     status = getattr(e, "status_code", None)
     detail = " ".join(str(getattr(e, "message", "") or e).split())[:200]
-    if isinstance(e, anthropic.AuthenticationError):
+    streamed = stream_error_type(e)  # an error event that ended the answer partway
+    if streamed:
+        what = {"overloaded_error": "was overloaded", "api_error": "had an error"}.get(streamed, f"stopped with {streamed}")
+        msg = (f"Anthropic's API {what} partway through an answer, even after asking again. Try again in a few "
+               f"minutes: gh bouncer {url}")
+    elif isinstance(e, httpx2.TransportError):
+        msg = (f"The connection to Anthropic's API dropped partway through an answer, even after asking again. Try "
+               f"again in a few minutes: gh bouncer {url}")
+    elif isinstance(e, anthropic.AuthenticationError):
         msg = f"Anthropic rejected your API key (401). Save a working key with gh bouncer --set-key {url}."
     elif isinstance(e, anthropic.PermissionDeniedError):
         msg = (f"Your Anthropic API key isn't allowed to make this request (403): {detail} "
@@ -258,6 +268,7 @@ def _issues_text(gh: GitHub, upstream: str, linked: list[dict]) -> str:
 
 def cmd_run(args) -> None:
     import anthropic
+    import httpx2
 
     gh = GitHub()
     upstream, pr_n = args.upstream, int(args.pr)
@@ -305,7 +316,9 @@ def cmd_run(args) -> None:
         review = agent.run(SYSTEM, content, [r.id for r in cfg.rules])
     except ReviewFailed as e:
         fail(review_failed_message(e, url, cfg.max_turns))
-    except anthropic.APIError as e:  # status, connection and timeout errors, after the client's retries
+    # Status, connection and timeout errors, after the client's retries, and network errors that
+    # cut an answer off partway (the SDK lets those through), after the agent's.
+    except (anthropic.APIError, httpx2.TransportError) as e:
         fail(api_error_message(e, url, cfg.model))
     verify_evidence(review, ws)
 

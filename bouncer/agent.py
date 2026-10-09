@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,12 @@ from pathlib import Path
 from .common import GitHub, GitHubError, untrusted
 
 MAX_TOOL_OUTPUT = 20_000
+# A streamed answer that is cut off partway (the connection drops, or the stream ends in an
+# overloaded_error or api_error event) is asked for again, up to this many more times, waiting
+# STREAM_RETRY_WAIT seconds and twice as long each time after. The SDK's own retries only cover
+# a request that fails before its answer starts.
+STREAM_RETRIES = 3
+STREAM_RETRY_WAIT = 15
 # Tool output kept in the conversation. Past this, the oldest large results are replaced by a
 # note so a long review stays inside the context window (next to a diff of up to 150k chars).
 MAX_HISTORY_CHARS = 250_000
@@ -210,9 +217,29 @@ class ReviewFailed(RuntimeError):
         self.kind = kind
 
 
+def stream_error_type(e: Exception) -> str | None:
+    """The error type of an error event that ended a streamed answer (overloaded_error,
+    api_error...). The SDK raises those as an APIStatusError with the stream's status, 200."""
+    import anthropic
+
+    if not isinstance(e, anthropic.APIStatusError) or e.status_code != 200 or not isinstance(e.body, dict):
+        return None
+    return str((e.body.get("error") or {}).get("type") or "") or None
+
+
+def interruption(e: Exception) -> str | None:
+    """Why a streamed answer stopped partway, if asking again may well work; None otherwise."""
+    import httpx2
+
+    if isinstance(e, httpx2.TransportError):  # the SDK lets these through once the answer has started
+        return f"the connection dropped: {type(e).__name__}"
+    kind = stream_error_type(e)
+    return kind if kind in ("overloaded_error", "api_error") else None
+
+
 class Agent:
     def __init__(self, client, model: str, effort: str, max_turns: int, ws: Workspace,
-                 gh: GitHub, upstream: str, log=print):
+                 gh: GitHub, upstream: str, log=print, sleep=time.sleep):
         self.client = client
         self.model = model
         self.effort = effort
@@ -221,6 +248,7 @@ class Agent:
         self.gh = gh
         self.upstream = upstream
         self.log = log
+        self.sleep = sleep
         self.usage = Usage()
 
     # --- tools -----------------------------------------------------------
@@ -301,16 +329,25 @@ class Agent:
     def _create(self, system, messages):
         # Streamed, then collected: a long thinking turn can outlast a plain request's HTTP
         # timeout, and the SDK refuses non-streaming requests this large for that reason.
-        with self.client.messages.stream(
-            model=self.model,
-            max_tokens=32_000,
-            system=system,
-            messages=messages,
-            tools=[{**t, "strict": True} for t in TOOLS],
-            tool_choice={"type": "auto"},
-            output_config={"effort": self.effort},
-        ) as stream:
-            return stream.get_final_message()
+        for attempt in range(STREAM_RETRIES + 1):
+            try:
+                with self.client.messages.stream(
+                    model=self.model,
+                    max_tokens=32_000,
+                    system=system,
+                    messages=messages,
+                    tools=[{**t, "strict": True} for t in TOOLS],
+                    tool_choice={"type": "auto"},
+                    output_config={"effort": self.effort},
+                ) as stream:
+                    return stream.get_final_message()
+            except Exception as e:  # noqa: BLE001 - only what interruption() names is asked again
+                why = interruption(e)
+                if why is None or attempt == STREAM_RETRIES:
+                    raise
+                wait = STREAM_RETRY_WAIT * 2 ** attempt
+                self.log(f"  the answer was cut off ({why}); asking again in {wait} s")
+                self.sleep(wait)
 
     def run(self, system: str, user_content: list, rule_ids: list[str]) -> dict:
         messages: list = [{"role": "user", "content": list(user_content)}]
