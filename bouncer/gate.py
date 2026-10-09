@@ -521,6 +521,12 @@ class Gate:
             return "changed"
         pr, labels = fresh, {lb["name"] for lb in fresh.get("labels", [])}
         if valid:
+            # Earliest wins: only the first review of this commit that counts is applied.
+            # TODO: a fork owner can delete their own attestations
+            # (DELETE /users/{username}/attestations/digest/{subject_digest}), hiding a bounce
+            # before the gate sees it. Also look the subject up in the Sigstore transparency log
+            # (Rekor), which is append-only, and count the earliest entry there. See "Open issue"
+            # in the README.
             return self._apply(pr, labels, sticky, state, valid[0], attempts=len(valid))
         if renote:
             for key, value in (("stale", stale or state.get("stale")), ("note", note)):

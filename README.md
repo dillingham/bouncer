@@ -33,13 +33,15 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
 | Get reviewed under older or weaker settings | The review signs a digest of the settings it used, and the gate only accepts reviews made with its current settings. |
 | Run an older version of the review, from before a fix | Each review signs the protocol version of the code that ran; the gate ignores reviews below the version it requires. |
 | Point the API at a fake endpoint | The base URL is hardcoded. |
-| Re-run until the model says yes | Every run for the same PR commit attests the same subject. The gate lists all of them and only honors the earliest. |
+| Re-run until the model says yes | Every run for the same PR commit attests the same subject. The gate lists all of them and only honors the earliest (but see the open issue below). |
 | Cancel runs heading for a bounce before they're signed | Nothing in the run (logs, summary, outputs) shows the verdict until the attestation exists. |
 | Push commits to reroll | Each new commit needs a new review that costs their tokens again, and review attempts are capped. |
 | Reuse a pass from another PR or commit | The repo, PR number and head commit are inside the signed payload and checked, and so is the fork's repository id in the signing certificate. |
 | Rename the fork, so the reviews signed under the old name don't match | Reviews are matched to the fork by the repository id in the signing certificate, which a rename doesn't change. |
 | Prompt-inject the reviewer through the PR | PR text, and every file and issue the reviewer reads, is fenced as untrusted data that can't close its own fence; attempts are flagged and fail the PR; a model "fail" also needs verified evidence, a Required rule the review skips counts as failed, and the final call is made in code, not by the model. |
 | Forge a bouncer state comment | Only comments by `github-actions[bot]` are read, and nothing in the state JSON can end its HTML comment. |
+
+**Open issue: deleted attestations.** GitHub lets a fork's owner delete their own attestations (`DELETE /users/{username}/attestations/digest/{subject_digest}`). A contributor whose review bounced can delete it before the gate sees it (the gate looks every 10 minutes) and run the review again, and the gate then only finds the new one. So earliest-wins only holds for the reviews the gate gets to see. Each retry still costs the contributor a full review on their own key, and a bounce the gate has already applied stays applied. The planned fix: also look up the subject in Sigstore's public transparency log (Rekor), which is append-only, and count the earliest entry found there, so deleting an attestation doesn't hide it.
 
 ## Add it to a project (maintainers)
 
@@ -86,7 +88,6 @@ These need a live run to confirm; none can be exercised offline:
 - **Reading the fork's attestations with the upstream token.** The gate fetches attestations from the contributor's public fork with the upstream repo's `GITHUB_TOKEN`. Public repos should allow this; test it with a throwaway fork first.
 - **Draft conversion.** GitHub may refuse `convertPullRequestToDraft` for the Actions token. It's best-effort; the `bouncer:pending` label is the real gate. Filter your PR list with `-label:bouncer:pending`.
 - **Renamed forks.** The gate downloads a fork's attestations by its current name and verifies them for the fork's owner, so reviews signed under an earlier name of the repository count too. That GitHub lists those under the new name is untested. A review signed before the owner renamed their account isn't found.
-- **Deleted attestations.** If a fork owner can delete an attestation from their repo, earliest-wins weakens. Entries still exist in the public Sigstore transparency log; checking it is a follow-up.
 - **Notifications** still fire when a PR opens; the gate controls what reaches review, not the inbox.
 - **Scheduled sweeps** pause after 60 days without repo activity (GitHub policy). `/bouncer check` still works.
 - **Anthropic only** for now. Other providers would be another client in `bouncer/agent.py`.
