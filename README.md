@@ -16,7 +16,7 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
    - checks out the base branch and the PR head **read-only** (PR code is never executed),
    - runs an agent that reads the touched files in full, greps for callers and APIs, checks existing tests, searches past issues and PRs for duplicates and declines, and evaluates every rule with file/line evidence,
    - verifies every piece of evidence against the actual files (quotes that don't match are discarded),
-   - signs the report with a GitHub artifact attestation.
+   - signs the report with a GitHub artifact attestation, and only then shows the verdict in the run.
 3. **The gate verifies the signature** (every 10 minutes, or right away on `/bouncer check`) and applies the verdict:
    - **pass**: `bouncer:pass`, marked ready for review, report posted for the maintainer.
    - **fail**: report posted with reasons, `bouncer:fail`, PR closed. The contributor can push fixes and reopen for another round, up to `max_attempts`.
@@ -31,6 +31,7 @@ gh bouncer <pr-url>      # contributors: runs the review for your pull request
 | Pick a cheap model, lower effort, or soften the rules | Model, effort and rules come from the upstream `.bouncer.yml`; the workflow has no inputs for them. |
 | Point the API at a fake endpoint | The base URL is hardcoded. |
 | Re-run until the model says yes | Every run for the same PR commit attests the same subject. The gate lists all of them and only honors the earliest. |
+| Cancel runs heading for a bounce before they're signed | Nothing in the run (logs, summary, outputs) shows the verdict until the attestation exists. |
 | Push commits to reroll | Each new commit is a new round that costs their tokens again, and bounced rounds are capped. |
 | Reuse a pass from another PR or commit | The repo, PR number and head commit are inside the signed payload and checked. |
 | Prompt-inject the reviewer through the PR | PR text is fenced as untrusted data; attempts are flagged and fail the PR; a model "fail" also needs verified evidence and the final call is made in code, not by the model. |

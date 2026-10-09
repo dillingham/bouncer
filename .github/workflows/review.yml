@@ -8,6 +8,10 @@
 # The contributor controls only the PR number and the key. The model, effort, rules,
 # prompt and API endpoint all come from this repository and the upstream base branch, and
 # the gate only accepts attestations signed by this exact workflow on a GitHub-hosted runner.
+#
+# Nothing before the signing step may reveal the verdict (logs, step summary, outputs).
+# Otherwise a contributor could cancel runs heading for a bounce before they are signed
+# and retry until one passes. The Report step shows it once the attestation exists.
 name: Bouncer review (reusable)
 
 on:
@@ -124,6 +128,12 @@ jobs:
           subject-digest: ${{ steps.review.outputs.subject_digest }}
           predicate-type: https://github.com/gh-bouncer/action/attestation/review/v1
           predicate-path: out/predicate.json
+
+      - name: Report
+        if: steps.pr.outputs.skip != 'true'
+        id: report
+        working-directory: .bouncer
+        run: python -m bouncer.review report --out-dir "$GITHUB_WORKSPACE/out"
 
       - name: Keep the report
         if: steps.pr.outputs.skip != 'true'

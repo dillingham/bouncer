@@ -2,7 +2,13 @@
 on the contributor's API key.
 
   python -m bouncer.review resolve --pr N     -> GITHUB_OUTPUT: upstream, base_sha, head_sha, ...
-  python -m bouncer.review run --pr N ...     -> out/predicate.json, out/report.md, subject outputs
+  python -m bouncer.review run --pr N ...     -> out/predicate.json, subject outputs (no verdict)
+  python -m bouncer.review report --out-dir   -> after signing: out/report.md, step summary, verdict output
+
+`run` must not reveal the verdict anywhere the contributor can watch (logs, step summary,
+outputs). Otherwise they could cancel every run heading for a bounce before the signing step
+and retry until one passes, and earliest-wins would never see the bounces. `report` runs only
+after the attestation exists.
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ from .prompt import SYSTEM, build_user_content
 from .render import review_markdown
 
 MAX_DIFF = 150_000
+CONFIG_COPY = "config.yml"  # the .bouncer.yml text the review used, for `report`
 
 
 def _out(**kv) -> None:
@@ -204,13 +211,26 @@ def cmd_run(args) -> None:
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "predicate.json").write_text(json.dumps(predicate, indent=1))
+    (out / CONFIG_COPY).write_text(cfg_text)
+    # No verdict here (see the module docstring): `report` shows it once the review is signed.
+    print("Review written. It is signed next, and the verdict is shown after that.")
+    _out(subject_name=name, subject_digest=f"sha256:{subject_digest(name)}")
+
+
+def cmd_report(args) -> None:
+    """Runs after the signing step: the verdict preview for the contributor."""
+    out = Path(args.out_dir)
+    predicate = json.loads((out / "predicate.json").read_text())
+    cfg = config_mod.parse((out / CONFIG_COPY).read_text())
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     preview = decide(predicate, cfg)
-    (out / "report.md").write_text(review_markdown(predicate, preview, server))
+    report = review_markdown(predicate, preview, server)
+    (out / "report.md").write_text(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a") as f:
-            f.write(review_markdown(predicate, preview, server))
-    _out(subject_name=name, subject_digest=f"sha256:{subject_digest(name)}", verdict=preview.outcome)
+            f.write(report)
+    _out(verdict=preview.outcome)
 
 
 def main(argv=None) -> None:
@@ -221,8 +241,9 @@ def main(argv=None) -> None:
     x = sub.add_parser("run")
     for a in ("--pr", "--upstream", "--head-repo", "--base-sha", "--head-sha", "--base-dir", "--head-dir", "--out-dir"):
         x.add_argument(a, required=True)
+    sub.add_parser("report").add_argument("--out-dir", required=True)
     args = p.parse_args(argv)
-    {"resolve": cmd_resolve, "run": cmd_run}[args.cmd](args)
+    {"resolve": cmd_resolve, "run": cmd_run, "report": cmd_report}[args.cmd](args)
 
 
 if __name__ == "__main__":

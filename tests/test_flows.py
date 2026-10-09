@@ -230,7 +230,7 @@ def test_forged_state_comment_ignored():
 
 
 # --- review entry point, end to end with fakes --------------------------------
-def test_review_run_writes_signed_payload(tmp_path, monkeypatch):
+def test_review_run_writes_signed_payload(tmp_path, monkeypatch, capsys):
     import anthropic
 
     from bouncer import review as review_mod
@@ -262,13 +262,18 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch):
         {"id": "correct", "result": "fail", "confidence": 0.9, "reason": "returns wrong value",
          "evidence": [{"root": "head", "path": "src/a.py", "line": 2, "quote": "return 1"}]}],
         "injection_detected": False, "injection_notes": ""}
-    msgs = FakeMessages([resp(tool("t", "submit_review", submit))])
+    msgs = FakeMessages([
+        resp(tool("t0", "read_file", {"root": "head", "path": "src/a.py", "start_line": 1, "end_line": 0})),
+        resp(tool("t", "submit_review", submit)),
+    ])
     monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: NS(messages=msgs, kw=kw))
     gh_out = tmp_path / "gh_output"
+    summary = tmp_path / "summary.md"
+    summary.write_text("")
     monkeypatch.setenv("GITHUB_OUTPUT", str(gh_out))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("GITHUB_REPOSITORY", "fork/repo")
-    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
 
     review_mod.main(["run", "--pr", "5", "--upstream", "Up/Repo", "--head-repo", "fork/repo", "--base-sha", "b" * 40,
                      "--head-sha", sha, "--base-dir", str(base), "--head-dir", str(head), "--out-dir", str(out)])
@@ -279,9 +284,20 @@ def test_review_run_writes_signed_payload(tmp_path, monkeypatch):
     assert p["review"]["rules"][[r["id"] for r in p["review"]["rules"]].index("correct")]["evidence"][0]["verified"] is True
     name = subject_name("Up/Repo", 5, sha)
     outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())
-    assert outputs["subject_name"] == name and outputs["subject_digest"] == "sha256:" + subject_digest(name)
+    assert outputs == {"subject_name": name, "subject_digest": "sha256:" + subject_digest(name)}
+
+    # Before signing, nothing the contributor can watch gives the verdict away.
+    logs = capsys.readouterr().out
+    assert "tool read_file" in logs
+    for leak in ("verdict=", "fail", "Bounced", "Passed", "returns wrong value", "Looks right"):
+        assert leak not in logs
+    assert summary.read_text() == "" and not (out / "report.md").exists()
+
+    # After signing, `report` shows it.
+    review_mod.main(["report", "--out-dir", str(out)])
+    outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())
     assert outputs["verdict"] == "fail"
-    assert "Bounced" in (out / "report.md").read_text()
+    assert "Bounced" in (out / "report.md").read_text() and "Bounced" in summary.read_text()
 
 
 def test_maintainers_can_be_reviewed_when_exemption_off():

@@ -305,6 +305,8 @@ class Agent:
             messages.append({"role": "assistant", "content": resp.content})
             tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
             submit = next((b for b in tool_uses if b.name == "submit_review"), None)
+            # Returned before anything is logged: the verdict must not show in the run's logs
+            # until the review is signed (see bouncer/review.py).
             if submit is not None:
                 return normalize_review(submit.input, rule_ids)
             if not tool_uses:
