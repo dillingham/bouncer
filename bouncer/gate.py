@@ -287,6 +287,24 @@ class Gate:
     def _close(self, n: int) -> None:
         self.gh.patch(f"/repos/{self.repo}/pulls/{n}", {"state": "closed"})
 
+    def _last_reopener(self, n: int, since: str) -> str | None:
+        """Who last reopened the pull request, from its timeline: "" if nobody did after `since`
+        (the current round's start, ISO 8601: a reopen that started the round isn't about its
+        verdict), None if GitHub can't say."""
+        owner, name = self.repo.split("/", 1)
+        q = """query($o:String!,$n:String!,$pr:Int!){repository(owner:$o,name:$n){pullRequest(number:$pr){
+          timelineItems(last:1,itemTypes:[REOPENED_EVENT]){nodes{...on ReopenedEvent{createdAt actor{login}}}}}}}"""
+        try:
+            data = self.gh.graphql(q, {"o": owner, "n": name, "pr": n})
+            nodes = data["repository"]["pullRequest"]["timelineItems"]["nodes"]
+        except (GitHubError, KeyError, TypeError) as e:
+            self.log(f"::warning::#{n}: couldn't tell who reopened it, leaving it to the next run: {e}")
+            return None
+        last = (nodes or [{}])[-1] or {}
+        if not last.get("createdAt") or last["createdAt"] <= since:
+            return ""
+        return (last.get("actor") or {}).get("login") or ""
+
     def _is_maintainer(self, login: str) -> bool:
         if not login:
             return False
@@ -411,17 +429,26 @@ class Gate:
         if base not in allowed:
             return self._wrong_base(pr, labels, sticky, state, base, allowed)
 
-        # Reopened by someone after a bounce, at the same commit.
-        if state and state.get("sha") == head_sha and action == "reopened" and state.get("status") in ("fail", "exhausted"):
-            if self._is_maintainer(sender or ""):
+        # Bounced at this commit, and open: someone reopened it (or close_on_fail is off). Who
+        # reopened it decides, whatever event this run is for. The reopen's own run may have been
+        # replaced in the PR's concurrency group by a later one (an edit, a /bouncer comment), so
+        # other runs look the reopen up: a maintainer's override isn't lost that way, and closing
+        # it again doesn't depend on which run got to go.
+        bounced = bool(state) and state.get("sha") == head_sha and state.get("status") in ("fail", "exhausted")
+        if bounced and (action == "reopened" or self.cfg.close_on_fail):
+            reopener = (sender or "") if action == "reopened" else self._last_reopener(n, state.get("requested_at", ""))
+            if reopener is None:
+                return state["status"]  # GitHub couldn't say; the next run decides
+            if self._is_maintainer(reopener):
                 state["status"] = "override"
                 self._release(pr, state)
                 self._save_state(n, sticky, status_text("override"), state)
                 self._set_labels(n, labels, None)
                 return "override"
-            self._comment(n, status_text("reclosed", url=self._url(n)))
-            self._close(n)
-            return "reclosed"
+            if self.cfg.close_on_fail:
+                self._comment(n, status_text("reclosed", url=self._url(n)))
+                self._close(n)
+                return "reclosed"
 
         # A maintainer set the bounce aside. That holds for later commits too, whatever
         # rereview_after_pass says: a new round could only end in another bounce or, with no
@@ -432,8 +459,10 @@ class Gate:
                 self._save_state(n, sticky, status_text("override"), state)
             return "override"
 
-        # A PR that expired without a review gets a fresh round when it is reopened, even at the same commit.
-        retry_expired = bool(state) and action == "reopened" and state.get("status") == "expired"
+        # A PR that expired without a review gets a fresh round when it is reopened, even at the same
+        # commit. It was closed at the deadline, so if it's open, it was reopened, whatever event
+        # this run is for (the reopen's own run may have been replaced by a later one).
+        retry_expired = bool(state) and state.get("status") == "expired"
         # So does one that was bounced for its base branch, once it targets an allowed one.
         retarget = bool(state) and state.get("status") == "wrong_base"
         # And a draft once it's marked ready.

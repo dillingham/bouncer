@@ -174,6 +174,8 @@ class FakeGitHub:
         self.compare_calls = []
         self.draft_refused = False  # GitHub may refuse convertPullRequestToDraft for the Actions token
         self.repo_labels = {}  # the repository's labels: name -> label
+        self.reopens = {}  # PR -> its timeline's ReopenedEvents, oldest first
+        self.timeline_error = None  # raised when the timeline is read
 
     def see(self, pr):
         """The pull request is now at this head/base and open (or closed). Labels and draft state
@@ -269,8 +271,19 @@ class FakeGitHub:
         n = self._num(path, 5)
         self.labels.get(n, set()).discard(path.rsplit("/", 1)[1].replace("%3A", ":"))
 
+    def reopen(self, n, by, at):
+        """Someone reopens the pull request: GitHub records it on the timeline, whichever gate run
+        gets to go for it."""
+        self.closed.discard(n)
+        self.reopens.setdefault(n, []).append({"createdAt": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "actor": {"login": by}})
+
     def graphql(self, q, v):
         self.graphql_calls.append(q)
+        if "REOPENED_EVENT" in q:
+            if self.timeline_error:
+                raise self.timeline_error
+            nodes = self.reopens.get(v["pr"], [])[-1:]
+            return {"repository": {"pullRequest": {"timelineItems": {"nodes": nodes}}}}
         n = int(v["id"].split("_")[1])
         if "convertPullRequestToDraft" in q:
             if self.draft_refused:
@@ -315,6 +328,8 @@ class TestGate(Gate):
 
     def process(self, pr, action=None, sender=None):
         if isinstance(self.gh, FakeGitHub):
+            if action == "reopened" and pr["number"] in self.gh.closed:
+                self.gh.reopen(pr["number"], sender, self.now)
             # What the test hands the gate is the pull request's current head; like every real
             # path, the gate then sees it as freshly read (with the labels it left on it).
             self.gh.see(pr)
@@ -861,6 +876,64 @@ def test_reopen_same_commit():
     assert gate(gh).process(make_pr(), action="reopened", sender="maint") == "override"
 
 
+def bounced_and_closed(gh, cfg_text=""):
+    gate(gh, cfg_text=cfg_text).process(make_pr(), action="opened")
+    gate(gh, verifier=lambda r, s: [found("fail")], now=T0 + dt.timedelta(hours=1), cfg_text=cfg_text).process(make_pr())
+
+
+@pytest.mark.parametrize("action", ["edited", "ready_for_review", None])
+def test_reopened_bounced_pr_is_closed_again_whatever_the_event(action):
+    gh = FakeGitHub(maintainers={"maint"})
+    bounced_and_closed(gh)
+    assert 7 in gh.closed and gh.state(7)["status"] == "fail"
+    # The author reopens it, and edits the title (or comments /bouncer check) before their "reopened"
+    # run starts: GitHub cancels that queued run, and only the newest one in bouncer-gate-7 runs.
+    later = T0 + dt.timedelta(hours=2)
+    gh.reopen(7, "drive-by", later)
+    assert gate(gh, now=later).process(make_pr(), action=action, sender="drive-by") == "reclosed"
+    assert 7 in gh.closed and gh.state(7)["status"] == "fail"
+    assert gh.bodies(7)[-1].startswith("### 🚪 Bouncer\n\nThis commit was already reviewed and bounced")
+    # a maintainer's reopen isn't lost that way: it overrides the bounce
+    gh.reopen(7, "maint", later)
+    assert gate(gh, now=later).process(make_pr(), action=action, sender="drive-by") == "override"
+    assert 7 not in gh.closed and gh.state(7)["status"] == "override"
+
+
+def test_only_a_reopen_in_this_round_can_override():
+    gh = FakeGitHub(maintainers={"maint"})
+    cfg = "gate: {max_attempts: 2}"
+    gate(gh, cfg_text=cfg).process(make_pr(), action="opened")
+    gate(gh, now=T0 + dt.timedelta(hours=49), cfg_text=cfg).process(make_pr())  # expired
+    later = T0 + dt.timedelta(hours=50)
+    assert gate(gh, now=later, cfg_text=cfg).process(make_pr(), action="reopened", sender="maint") == "pending"
+    gate(gh, verifier=lambda r, s: [found("fail")], now=later, cfg_text=cfg).process(make_pr())
+    # Bounced, but closing it failed, so it's still open: the maintainer's reopen was for the last round.
+    gh.closed.discard(7)
+    assert gate(gh, now=later, cfg_text=cfg).process(make_pr(), action="edited", sender="drive-by") == "reclosed"
+
+
+def test_reopener_unknown_leaves_it_to_the_next_run():
+    gh = FakeGitHub(maintainers={"maint"})
+    bounced_and_closed(gh)
+    gh.reopen(7, "maint", T0 + dt.timedelta(hours=2))
+    gh.timeline_error = GitHubError(502, "Bad Gateway")
+    logs = []
+    assert gate(gh, log=logs.append).process(make_pr(), action="edited") == "fail"
+    assert 7 not in gh.closed and any("couldn't tell who reopened it" in line for line in logs)
+    gh.timeline_error = None
+    assert gate(gh).process(make_pr(), action="edited") == "override"
+
+
+def test_bounced_pr_left_open_stays_open():
+    gh = FakeGitHub()
+    cfg = "gate: {close_on_fail: false}"
+    bounced_and_closed(gh, cfg)
+    assert 7 not in gh.closed
+    for action in ("edited", None):
+        assert gate(gh, cfg_text=cfg).process(make_pr(), action=action, sender="drive-by") == "fail"
+    assert 7 not in gh.closed and not any("REOPENED_EVENT" in q for q in gh.graphql_calls)
+
+
 def test_out_of_attempts_respects_close_on_fail():
     gh = FakeGitHub()
     cfg = "gate: {max_attempts: 1, close_on_fail: false}"
@@ -1141,12 +1214,14 @@ def test_pending_pr_reopened_after_its_deadline_gets_a_new_one():
     assert gate(gh, now=later + dt.timedelta(hours=49)).process(make_pr()) == "expired"
 
 
-def test_reopen_after_expiry_starts_new_round():
+@pytest.mark.parametrize("action", ["reopened", "edited", None])
+def test_reopen_after_expiry_starts_new_round(action):
     gh = FakeGitHub()
     gate(gh).process(make_pr(), action="opened")
     gate(gh, now=T0 + dt.timedelta(hours=49)).process(make_pr())
     later = T0 + dt.timedelta(hours=50)
-    assert gate(gh, now=later).process(make_pr(), action="reopened", sender="drive-by") == "pending"
+    gh.reopen(7, "drive-by", later)  # whether this run is the reopen's own or a later one
+    assert gate(gh, now=later).process(make_pr(), action=action, sender="drive-by") == "pending"
     st = gh.state(7)
     assert st["rounds"] == 2 and st["fails"] == 1
 
