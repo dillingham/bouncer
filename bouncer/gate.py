@@ -278,7 +278,7 @@ class Gate:
             state["status"] = "expired"
             state["fails"] = int(state.get("fails", 0)) + 1
             self._save_state(n, sticky, "### 🚪 Bouncer\n\nNo signed review arrived before the deadline. Closing. "
-                             "Reopen this pull request, then run the review in your fork (`gh bouncer` or the Bouncer review workflow).", state)
+                             "Reopen this pull request, then run `gh bouncer` with its URL.", state)
             self._set_labels(n, labels, L_FAIL)
             self._close(n)
             self.log(f"#{n}: expired")
@@ -303,7 +303,7 @@ class Gate:
             state["fails"] = int(state.get("fails", 0)) + 1
             left = self.cfg.max_attempts - state["fails"]
             if self.cfg.close_on_fail:
-                more = (f"Push fixes, reopen this pull request, then run the review again ({left} round{'s' if left != 1 else ''} left)."
+                more = (f"Push fixes, reopen this pull request, then run `gh bouncer` again ({left} round{'s' if left != 1 else ''} left)."
                         if left > 0 else "No review rounds left.")
                 self._save_state(n, sticky, f"### 🚪 Bouncer\n\n⛔ Bounced. {more}", state)
                 self._set_labels(n, labels, L_FAIL)
@@ -349,11 +349,27 @@ def load_config(gh: GitHub, repo: str) -> config_mod.Config:
     return config_mod.parse(text or "")
 
 
+def action_identity(action_path: str) -> tuple[str, str]:
+    """owner/repo and ref of this action, from the runner's download path
+    (/home/runner/work/_actions/OWNER/REPO/REF)."""
+    marker = "/_actions/"
+    norm = (action_path or "").replace("\\", "/")
+    if marker not in norm:
+        return "", ""
+    parts = norm.split(marker, 1)[1].strip("/").split("/")
+    if len(parts) < 3:
+        return "", ""
+    return f"{parts[0]}/{parts[1]}", "/".join(parts[2:])
+
+
 def main() -> None:
     repo = os.environ["GITHUB_REPOSITORY"]
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-    bouncer_repo = os.environ["BOUNCER_REPO"]
-    bouncer_sha = os.environ.get("BOUNCER_SHA", "")
+    bouncer_repo, bouncer_ref = action_identity(os.environ.get("BOUNCER_ACTION_PATH", ""))
+    bouncer_repo = os.environ.get("BOUNCER_REPO") or bouncer_repo
+    if not bouncer_repo:
+        print("::error::Could not tell which bouncer action is running. Use it as `uses: gh-bouncer/action@v1`.")
+        sys.exit(1)
     gh = GitHub()
     try:
         cfg = load_config(gh, repo)
@@ -362,7 +378,9 @@ def main() -> None:
         sys.exit(1)
     host = urllib.parse.urlparse(server).netloc
     signer = f"{host}/{bouncer_repo}/.github/workflows/review.yml"
-    digest = bouncer_sha if cfg.pin_review_to_gate_version else None
+    digest = None
+    if cfg.pin_review_to_gate_version:
+        digest = gh.get(f"/repos/{bouncer_repo}/commits/{urllib.parse.quote(bouncer_ref, safe='')}")["sha"]
 
     def verifier(head_repo: str, name: str) -> list[Found]:
         return gh_verifier(head_repo, name, signer, digest)

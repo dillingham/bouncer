@@ -1,6 +1,6 @@
 # Reusable workflow: the bouncer review.
 #
-# Called from a contributor's fork (via .github/workflows/bouncer-review.yml, which the
+# Called from a contributor's fork (via the review job in .github/workflows/bouncer.yml, which the
 # fork inherits from the upstream project). It runs on the contributor's runner minutes and
 # the contributor's ANTHROPIC_API_KEY, reviews the pull request against the maintainers'
 # .bouncer.yml, and signs the result with a GitHub artifact attestation.
@@ -122,7 +122,7 @@ jobs:
         with:
           subject-name: ${{ steps.review.outputs.subject_name }}
           subject-digest: ${{ steps.review.outputs.subject_digest }}
-          predicate-type: https://github.com/pr-bouncer/bouncer/attestation/review/v1
+          predicate-type: https://github.com/gh-bouncer/action/attestation/review/v1
           predicate-path: out/predicate.json
 
       - name: Keep the report

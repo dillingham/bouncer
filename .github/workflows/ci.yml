@@ -17,4 +17,4 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest actionlint-py
       - run: python -m pytest -q
-      - run: actionlint .github/workflows/*.yml templates/.github/workflows/*.yml
+      - run: actionlint .github/workflows/*.yml templates/bouncer.yml

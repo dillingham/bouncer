@@ -86,26 +86,18 @@ def parse_state(comments: list[dict]) -> tuple[dict | None, dict | None]:
 
 def instructions(pr: int, head_repo: str, upstream: str, deadline: str, attempts_left: int,
                  server: str = "https://github.com") -> str:
-    fork = f"{server}/{head_repo}"
     url = f"{server}/{upstream}/pull/{pr}"
     return f"""### 🚪 Bouncer review required
 
 This project has an automated bouncer review outside pull requests before a maintainer looks at them. **The review runs in your fork, on your own Anthropic API key.** Maintainers pay nothing and pick it up once it passes.
 
-**From a terminal**, one command:
+Run this with the [GitHub CLI](https://cli.github.com):
 
 ```
-gh extension install pr-bouncer/gh-bouncer
+gh extension install gh-bouncer/gh-bouncer
 gh bouncer {url}
 ```
 
-It turns on the review workflow in your fork, stores your key as a secret there (from `$ANTHROPIC_API_KEY`, or it asks), runs the review and reports back here.
-
-**Or in the browser:**
-
-1. Add your key as a secret named `ANTHROPIC_API_KEY` in [your fork's settings]({fork}/settings/secrets/actions/new).
-2. Open [Bouncer review]({fork}/actions/workflows/bouncer-review.yml), enable workflows if GitHub asks, choose this pull request's branch and click **Run workflow**.
-
-After that, every push to this branch is reviewed automatically. This pull request is checked every 10 minutes; comment `/bouncer check` to check right away.
+It sets up the review in your fork, asks for your key the first time (it's stored only as a secret in your fork), runs the review and reports back here. After that, every push to this branch is reviewed automatically.
 
 Only the first review of each commit counts. Deadline: **{deadline}**, after which this pull request is closed. Review rounds left: {attempts_left}."""

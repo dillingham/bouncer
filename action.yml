@@ -1,0 +1,33 @@
+name: Bouncer gate
+description: Holds outside pull requests until the contributor runs a signed bouncer review on their own API key.
+author: gh-bouncer
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  github-token:
+    description: Token for labeling, commenting on and closing pull requests.
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+
+    - name: Install bouncer
+      shell: bash
+      run: pip install --disable-pip-version-check -q -r "$GITHUB_ACTION_PATH/requirements.txt"
+
+    # Never checks out or runs pull request code, which keeps pull_request_target safe.
+    - name: Gate
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        BOUNCER_ACTION_PATH: ${{ github.action_path }}
+      run: python -m bouncer.gate

@@ -161,7 +161,7 @@ def test_new_pr_gets_instructions_then_passes():
     st = gh.state(7)
     assert st["status"] == "pending" and st["rounds"] == 1
     assert "bouncer:pending" in gh.labels[7]
-    assert "Run workflow" in gh.bodies(7)[0] and "fork/repo" in gh.bodies(7)[0]
+    assert "gh bouncer https://github.com/up/repo/pull/7" in gh.bodies(7)[0]
     assert any("convertPullRequestToDraft" in q for q in gh.graphql_calls)
 
     result = gate(gh, verifier=lambda r, s: [found("pass")], now=T0 + dt.timedelta(hours=1)).process(make_pr(labels=["bouncer:pending"], draft=True))
@@ -299,13 +299,20 @@ def test_reopen_after_expiry_starts_new_round():
     assert st["rounds"] == 2 and st["fails"] == 1
 
 
-def test_instructions_offer_cli_and_direct_links():
+def test_instructions_are_one_command():
     gh = FakeGitHub()
     gate(gh).process(make_pr(), action="opened")
     body = gh.bodies(7)[0]
+    assert "gh extension install gh-bouncer/gh-bouncer" in body
     assert "gh bouncer https://github.com/up/repo/pull/7" in body
-    assert "https://github.com/fork/repo/actions/workflows/bouncer-review.yml" in body
-    assert "https://github.com/fork/repo/settings/secrets/actions/new" in body
+
+
+def test_action_identity_from_runner_path():
+    from bouncer.gate import action_identity
+
+    assert action_identity("/home/runner/work/_actions/gh-bouncer/action/v1") == ("gh-bouncer/action", "v1")
+    assert action_identity("/home/runner/work/_actions/gh-bouncer/action/feature/x") == ("gh-bouncer/action", "feature/x")
+    assert action_identity("/somewhere/else") == ("", "")
 
 
 # --- resolve: manual vs automatic runs -------------------------------------------

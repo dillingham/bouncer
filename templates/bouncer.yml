@@ -1,0 +1,54 @@
+# Bouncer: https://github.com/gh-bouncer/gh-bouncer
+# In this repository, the gate holds outside pull requests until they pass a signed review.
+# In forks, the review runs on the contributor's own ANTHROPIC_API_KEY (via `gh bouncer`).
+name: Bouncer
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "7,17,27,37,47,57 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: false
+        type: string
+  push:
+
+permissions: {}
+
+jobs:
+  gate:
+    if: >-
+      !github.event.repository.fork && (
+        github.event_name == 'pull_request_target' ||
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/bouncer'))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: bouncer-gate-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || 'sweep' }}
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      attestations: read
+    steps:
+      - uses: gh-bouncer/action@v1
+
+  review:
+    if: github.event.repository.fork && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: gh-bouncer/action/.github/workflows/review.yml@v1
+    with:
+      pr: ${{ inputs.pr || '' }}
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

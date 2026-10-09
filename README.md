@@ -1,11 +1,17 @@
-# Bouncer
+# Bouncer action
 
-Contributor-paid pull request reviews for GitHub. An outside pull request doesn't get a maintainer's attention until the contributor runs a thorough AI review of it **in their own fork, on their own API key**, against the maintainers' rules. The maintainer pays nothing, and so do you: there is no server. Everything runs in GitHub Actions.
+The engine behind [`gh bouncer`](https://github.com/gh-bouncer/gh-bouncer): contributor-paid pull request reviews for GitHub. An outside pull request doesn't get a maintainer's attention until the contributor runs a thorough AI review of it **in their own fork, on their own API key**, against the maintainers' rules. Maintainers pay nothing. There is no server; everything runs in GitHub Actions.
+
+```
+gh extension install gh-bouncer/gh-bouncer
+gh bouncer init          # maintainers: opens a PR that installs bouncer in your repo
+gh bouncer <pr-url>      # contributors: runs the review for your pull request
+```
 
 ## How it works
 
 1. **Someone outside the team opens a PR.** The gate (in the maintainer's repo) labels it `bouncer:pending`, converts it to a draft, and comments with instructions and a deadline.
-2. **The contributor runs "Bouncer review" from their fork's Actions tab**, with their `ANTHROPIC_API_KEY` secret. The workflow:
+2. **The contributor runs `gh bouncer <pr-url>`.** It sets up their fork and stores their key as a fork secret the first time, then runs the review there. The review:
    - reads `.bouncer.yml` from the upstream base branch (model, effort, rules: all maintainer-controlled),
    - checks out the base branch and the PR head **read-only** (PR code is never executed),
    - runs an agent that reads the touched files in full, greps for callers and APIs, checks existing tests, searches past issues and PRs for duplicates and declines, and evaluates every rule with file/line evidence,
@@ -20,7 +26,7 @@ Contributor-paid pull request reviews for GitHub. An outside pull request doesn'
 
 | Attempt | What stops it |
 |---|---|
-| Edit the review workflow in their fork | The gate only accepts attestations signed by `pr-bouncer/bouncer/.github/workflows/review.yml`, so a modified workflow signs with the wrong identity. |
+| Edit the review workflow in their fork | The gate only accepts attestations signed by `gh-bouncer/action/.github/workflows/review.yml`, so a modified workflow signs with the wrong identity. |
 | Run it on their own machine or a self-hosted runner | Verified with `--deny-self-hosted-runners`. |
 | Pick a cheap model, lower effort, or soften the rules | Model, effort and rules come from the upstream `.bouncer.yml`; the workflow has no inputs for them. |
 | Point the API at a fake endpoint | The base URL is hardcoded. |
@@ -32,20 +38,18 @@ Contributor-paid pull request reviews for GitHub. An outside pull request doesn'
 
 ## Add it to a project (maintainers)
 
-1. Copy `templates/.github/workflows/bouncer-gate.yml` and `bouncer-review.yml` into the project's `.github/workflows/`, and `templates/.bouncer.yml` to the repo root. Edit the rules and `guidance` to match the project.
-2. Merge to the default branch. New forks inherit `bouncer-review.yml`; it only runs in forks.
-3. Optional: add `guidance` about scope and the things you never accept. That text is the strongest lever on verdict quality.
+Run `gh bouncer init` in the project (or `gh bouncer init -R owner/repo`). It opens a pull request that adds:
+
+- `.github/workflows/bouncer.yml`: one workflow with two jobs. In your repo the **gate** job runs `uses: gh-bouncer/action@v1`. In forks, which inherit the file, the **review** job runs the signed review on the contributor's key.
+- `.bouncer.yml`: model, effort, deadlines and rules. Edit the rules and `guidance` to match the project before merging; `guidance` (scope, things you never accept) is the strongest lever on verdict quality.
 
 Members, collaborators, prior contributors (configurable), listed bots, and any PR labeled `bouncer:skip` are exempt. Reopening a bounced PR yourself overrides the verdict.
 
+Prefer to do it by hand? Copy `templates/bouncer.yml` to `.github/workflows/bouncer.yml` and `templates/.bouncer.yml` to the repo root.
+
 ## Contributor experience
 
-The gate's comment gives them two ways in:
-
-- **Terminal:** `gh extension install pr-bouncer/gh-bouncer`, then `gh bouncer <pr-url>`. It turns on the review workflow in their fork, stores their key as a fork secret, runs the review and reports back on the PR.
-- **Browser:** add `ANTHROPIC_API_KEY` as a secret in their fork, then click **Run workflow** on their PR's branch. Direct links to both pages are in the comment.
-
-After the first run, every push to the PR branch is reviewed automatically. Pushes with no open PR, or forks without a key, exit quietly. The key stays a secret in their own fork, and the report shows how many tokens their review used.
+The gate's comment has one instruction: install the extension and run `gh bouncer <pr-url>`. It turns on the review in their fork, stores their key as a fork secret (asking the first time), runs the review and reports back on the PR. After that, every push to the PR branch is reviewed automatically; pushes with no open PR, or forks without a key, exit quietly. The key never leaves their fork's secrets, and the report shows how many tokens their review used.
 
 ## Before trusting it on a busy repo
 
@@ -61,10 +65,10 @@ These need a live run to confirm; none can be exercised offline:
 ## Layout
 
 ```
-.github/workflows/review.yml   reusable: the review, run from contributor forks
-.github/workflows/gate.yml     reusable: the gate, run in the maintainer's repo
+action.yml                     the gate, used as gh-bouncer/action@v1 in the maintainer's repo
+.github/workflows/review.yml   reusable: the signed review, run from contributor forks
 bouncer/                       Python: config, facts, agent, decide, gate, render
-templates/                     what maintainers copy into their project
+templates/                     what gh bouncer init installs
 tests/                         pytest suite (fakes for GitHub and Anthropic; real gh verify output)
 ```
 
